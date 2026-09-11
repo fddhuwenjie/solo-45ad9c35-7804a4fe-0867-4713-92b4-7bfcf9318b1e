@@ -43,6 +43,39 @@ CREATE TABLE IF NOT EXISTS pairings (
   created_at TEXT NOT NULL,
   result_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS failsafe_tests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  valve_id INTEGER NOT NULL REFERENCES valves(id),
+  fail_mode TEXT NOT NULL,
+  phase TEXT NOT NULL,
+  submitted_at TEXT NOT NULL,
+  test_started_at TEXT,
+  range_min REAL NOT NULL,
+  range_max REAL NOT NULL,
+  range_unit TEXT NOT NULL,
+  conditions_json TEXT NOT NULL,
+  thresholds_json TEXT NOT NULL,
+  observation_window_s REAL NOT NULL,
+  calibration_valid_until TEXT,
+  payload_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS failsafe_analyses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  failsafe_test_id INTEGER NOT NULL REFERENCES failsafe_tests(id),
+  version INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  author TEXT NOT NULL DEFAULT 'auto',
+  adjustments_json TEXT NOT NULL DEFAULT '[]',
+  result_json TEXT NOT NULL,
+  UNIQUE(failsafe_test_id, version)
+);
+CREATE TABLE IF NOT EXISTS failsafe_trends (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  valve_id INTEGER NOT NULL,
+  fail_mode TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  result_json TEXT NOT NULL
+);
 """
 
 
@@ -163,6 +196,104 @@ class Database:
 
     def get_pairing(self, pairing_id):
         row = self._conn.execute("SELECT * FROM pairings WHERE id=?", (pairing_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["result"] = json.loads(d.pop("result_json"))
+        return d
+
+    # ---- 故障安全测试 ----
+    def create_failsafe_test(self, valve_id, fail_mode, phase, test_started_at,
+                             range_min, range_max, range_unit, conditions, thresholds,
+                             observation_window_s, calibration_valid_until, payload):
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """INSERT INTO failsafe_tests(valve_id, fail_mode, phase, submitted_at,
+                   test_started_at, range_min, range_max, range_unit, conditions_json,
+                   thresholds_json, observation_window_s, calibration_valid_until, payload_json)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (valve_id, fail_mode, phase, _now(), test_started_at, range_min, range_max,
+                 range_unit, json.dumps(conditions), json.dumps(thresholds),
+                 observation_window_s, calibration_valid_until, json.dumps(payload)))
+            return cur.lastrowid
+
+    def get_failsafe_test(self, fs_test_id):
+        row = self._conn.execute(
+            "SELECT * FROM failsafe_tests WHERE id=?", (fs_test_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["conditions"] = json.loads(d.pop("conditions_json"))
+        d["thresholds"] = json.loads(d.pop("thresholds_json"))
+        d["payload"] = json.loads(d.pop("payload_json"))
+        return d
+
+    def list_failsafe_tests(self, valve_id=None):
+        q = ("SELECT id, valve_id, fail_mode, phase, submitted_at, test_started_at "
+             "FROM failsafe_tests")
+        args = ()
+        if valve_id is not None:
+            q += " WHERE valve_id=?"
+            args = (valve_id,)
+        return [dict(r) for r in self._conn.execute(q + " ORDER BY id", args)]
+
+    # ---- 故障安全分析版本 ----
+    def create_failsafe_analysis(self, fs_test_id, author, adjustments, result):
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(version),0) AS v FROM failsafe_analyses WHERE failsafe_test_id=?",
+                (fs_test_id,)).fetchone()
+            version = row["v"] + 1
+            cur = self._conn.execute(
+                """INSERT INTO failsafe_analyses(failsafe_test_id, version, created_at, author,
+                   adjustments_json, result_json) VALUES(?,?,?,?,?,?)""",
+                (fs_test_id, version, _now(), author,
+                 json.dumps(adjustments), json.dumps(result)))
+            return cur.lastrowid, version
+
+    def get_failsafe_analysis(self, analysis_id):
+        row = self._conn.execute(
+            "SELECT * FROM failsafe_analyses WHERE id=?", (analysis_id,)).fetchone()
+        return self._fs_analysis_row(row)
+
+    def list_failsafe_analyses(self, fs_test_id):
+        rows = self._conn.execute(
+            """SELECT id, failsafe_test_id, version, created_at, author
+               FROM failsafe_analyses WHERE failsafe_test_id=? ORDER BY version""",
+            (fs_test_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def latest_failsafe_analysis_ids(self, valve_id, fail_mode):
+        """同阀门同故障模式每个测试的最新分析版本，按测试时间排序。"""
+        rows = self._conn.execute(
+            """SELECT t.id AS tid,
+                      COALESCE(t.test_started_at, t.submitted_at) AS ttime,
+                      (SELECT a.id FROM failsafe_analyses a
+                       WHERE a.failsafe_test_id=t.id ORDER BY a.version DESC LIMIT 1) AS aid
+               FROM failsafe_tests t WHERE t.valve_id=? AND t.fail_mode=?
+               ORDER BY ttime, t.id""", (valve_id, fail_mode)).fetchall()
+        return [(r["tid"], r["aid"], r["ttime"]) for r in rows if r["aid"] is not None]
+
+    @staticmethod
+    def _fs_analysis_row(row):
+        if not row:
+            return None
+        d = dict(row)
+        d["adjustments"] = json.loads(d.pop("adjustments_json"))
+        d["result"] = json.loads(d.pop("result_json"))
+        return d
+
+    # ---- 故障安全退化趋势 ----
+    def create_failsafe_trend(self, valve_id, fail_mode, result):
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """INSERT INTO failsafe_trends(valve_id, fail_mode, created_at, result_json)
+                   VALUES(?,?,?,?)""", (valve_id, fail_mode, _now(), json.dumps(result)))
+            return cur.lastrowid
+
+    def get_failsafe_trend(self, trend_id):
+        row = self._conn.execute(
+            "SELECT * FROM failsafe_trends WHERE id=?", (trend_id,)).fetchone()
         if not row:
             return None
         d = dict(row)

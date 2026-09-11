@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from . import analysis, pairing, report, schemas
 from .db import Database
+from .failsafe import failsafe_analysis, failsafe_report, trend as fs_trend
 
 SAMPLES_DIR = Path(__file__).resolve().parent.parent / "samples"
 DEFAULT_DB = os.environ.get("VALVE_DB_PATH", str(Path(__file__).resolve().parent.parent / "valve_diag.db"))
@@ -147,6 +148,134 @@ def create_app(db_path=DEFAULT_DB):
         test = db.get_test(a["test_id"])
         valve = db.get_valve(test["valve_id"])
         return report.render_report(a, test, valve)
+
+    # ===================== 故障安全动作测试 =====================
+
+    @app.post("/failsafe/tests", status_code=201)
+    def submit_failsafe_test(body: schemas.FSTestSubmission, db=Depends(get_db)):
+        valve = db.get_valve_by_tag(body.valve_tag)
+        if valve is None:
+            vid = db.create_valve(body.valve_tag, body.valve_description)
+            valve = db.get_valve(vid)
+        payload = body.model_dump()
+        fs_test_id = db.create_failsafe_test(
+            valve_id=valve["id"],
+            fail_mode=body.fail_mode,
+            phase=body.phase,
+            test_started_at=body.test_started_at,
+            range_min=body.range.min,
+            range_max=body.range.max,
+            range_unit=body.range.unit,
+            conditions=body.conditions.model_dump(),
+            thresholds=body.thresholds.model_dump(),
+            observation_window_s=body.observation_window_s,
+            calibration_valid_until=body.calibration_valid_until,
+            payload=payload,
+        )
+        return {"failsafe_test_id": fs_test_id, "valve_id": valve["id"]}
+
+    @app.get("/failsafe/tests/{fs_test_id}")
+    def get_failsafe_test(fs_test_id: int, db=Depends(get_db)):
+        t = db.get_failsafe_test(fs_test_id)
+        if not t:
+            raise HTTPException(404, "故障安全测试不存在")
+        t["analyses"] = db.list_failsafe_analyses(fs_test_id)
+        return t
+
+    @app.post("/failsafe/tests/{fs_test_id}/analyze", status_code=201)
+    def analyze_failsafe(fs_test_id: int, body: schemas.AnalyzeRequest | None = None,
+                         db=Depends(get_db)):
+        if db.get_failsafe_test(fs_test_id) is None:
+            raise HTTPException(404, "故障安全测试不存在")
+        author = body.author if body else "auto"
+        return failsafe_analysis.run_failsafe_analysis(db, fs_test_id, author=author)
+
+    @app.get("/failsafe/tests/{fs_test_id}/analyses")
+    def list_failsafe_analyses(fs_test_id: int, db=Depends(get_db)):
+        return db.list_failsafe_analyses(fs_test_id)
+
+    @app.get("/failsafe/analyses/{analysis_id}")
+    def get_failsafe_analysis(analysis_id: int, db=Depends(get_db)):
+        a = db.get_failsafe_analysis(analysis_id)
+        if not a:
+            raise HTTPException(404, "故障安全分析不存在")
+        return a
+
+    @app.post("/failsafe/analyses/{analysis_id}/adjust", status_code=201)
+    def adjust_failsafe(analysis_id: int, body: schemas.FSAdjustRequest, db=Depends(get_db)):
+        base = db.get_failsafe_analysis(analysis_id)
+        if not base:
+            raise HTTPException(404, "故障安全分析不存在")
+        if body.trip_move is None and body.window_move is None:
+            raise HTTPException(422, "调整请求为空：需包含 trip_move 或 window_move")
+        new_adj = {}
+        if body.trip_move is not None:
+            new_adj["trip_move"] = body.trip_move.model_dump()
+        if body.window_move is not None:
+            if body.window_move.window_end_s <= 0:
+                raise HTTPException(422, "观察窗长度必须为正数（跳闸后秒）")
+            new_adj["window_move"] = body.window_move.model_dump()
+        try:
+            return failsafe_analysis.run_failsafe_analysis(
+                db, base["failsafe_test_id"], author=body.author,
+                new_adjustments=new_adj)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/failsafe/trends", status_code=201)
+    def create_failsafe_trend(body: schemas.FSTrendRequest, db=Depends(get_db)):
+        try:
+            if body.analysis_ids:
+                data = fs_trend.build_trend(db, analysis_ids=body.analysis_ids)
+                valve_id = data.get("valve_id")
+                mode = data.get("fail_mode")
+            else:
+                if not body.valve_tag or not body.fail_mode:
+                    raise HTTPException(422, "未指定 analysis_ids 时必须提供 valve_tag 与 fail_mode")
+                valve = db.get_valve_by_tag(body.valve_tag)
+                if valve is None:
+                    raise HTTPException(404, "阀门不存在")
+                data = fs_trend.build_trend(
+                    db, valve_id=valve["id"], fail_mode=body.fail_mode)
+                valve_id, mode = valve["id"], body.fail_mode
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+        trend_id = db.create_failsafe_trend(valve_id, mode, data)
+        return {"trend_id": trend_id, **data}
+
+    @app.get("/failsafe/trends/{trend_id}")
+    def get_failsafe_trend(trend_id: int, db=Depends(get_db)):
+        t = db.get_failsafe_trend(trend_id)
+        if not t:
+            raise HTTPException(404, "趋势记录不存在")
+        return t
+
+    @app.get("/failsafe/analyses/{analysis_id}/export")
+    def export_failsafe_json(analysis_id: int, db=Depends(get_db)):
+        a = db.get_failsafe_analysis(analysis_id)
+        if not a:
+            raise HTTPException(404, "故障安全分析不存在")
+        return JSONResponse(
+            content=a,
+            headers={"Content-Disposition":
+                     f'attachment; filename="failsafe_{analysis_id}_v{a["version"]}.json"'})
+
+    @app.get("/failsafe/analyses/{analysis_id}/report", response_class=HTMLResponse)
+    def fs_html_report(analysis_id: int, db=Depends(get_db)):
+        a = db.get_failsafe_analysis(analysis_id)
+        if not a:
+            raise HTTPException(404, "故障安全分析不存在")
+        t = db.get_failsafe_test(a["failsafe_test_id"])
+        valve = db.get_valve(t["valve_id"])
+        return failsafe_report.render_fs_report(a, t, valve)
+
+    @app.get("/failsafe/trends/{trend_id}/report", response_class=HTMLResponse)
+    def fs_trend_report(trend_id: int, db=Depends(get_db)):
+        rec = db.get_failsafe_trend(trend_id)
+        if not rec:
+            raise HTTPException(404, "趋势记录不存在")
+        valve = db.get_valve(rec["valve_id"])
+        return failsafe_report.render_fs_trend_report(trend_id, rec["result"], valve)
 
     # ---- 请求样例 ----
     @app.get("/samples")

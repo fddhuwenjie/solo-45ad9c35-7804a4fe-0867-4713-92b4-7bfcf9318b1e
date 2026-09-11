@@ -28,13 +28,14 @@ def _interp(ts, vs, t):
     return vs[lo] + f * (vs[hi] - vs[lo])
 
 
-def align(series):
+def align(series, channels=("command", "position", "pressure")):
     """series: {channel: (ts, values)}。对齐到公共网格。
 
     网格步长取各通道采样间隔中位数的最小值，限制在 [0.02, 1.0] s；
-    时间窗取各通道的重叠区间。返回 (grid, aligned, meta)。
+    时间窗取各通道的重叠区间。channels 指定参与对齐的通道（故障安全测试
+    额外纳入跳闸接点 trip）。返回 (grid, aligned, meta)。
     """
-    channels = [c for c in ("command", "position", "pressure") if c in series]
+    channels = tuple(c for c in channels if c in series)
     t0 = max(min(series[c][0]) for c in channels)
     t1 = min(max(series[c][0]) for c in channels)
     if t1 <= t0:
