@@ -59,9 +59,48 @@ def _coverage(ts, lo, hi):
     return min(1.0, n / expected)
 
 
-def _dropouts_in_window(raw_series, trip_time, window_end, coverage_min=0.8):
-    """动作窗内的采样断档；阀位缺口/冻结覆盖动作窗比例过大时构成证据缺口。"""
-    events_out = detection.detect_dropouts(raw_series)
+def _dropouts_in_window(raw_series, trip_time, window_end, coverage_min=0.8,
+                        settle_band=2.0, fail_mode="fail_close", fip_drift=2.0,
+                        pre_trip_pos=60.0):
+    """动作窗内的采样断档；阀位缺口/冻结覆盖动作窗比例过大时构成证据缺口。
+
+    阀位到安全位后的恒定平台是机械到位的合法表现，并非信号冻结：
+    跳闸后、阀位已在安全位带（fail-in-place 为原位保持带）内的 frozen 事件
+    重分类为 in_band_platform，不计入断档覆盖。时间缺口（gap）与带外冻结
+    仍然计入。
+    """
+    all_events = detection.detect_dropouts(raw_series)
+    pos_ts, pos_vs = raw_series["position"]
+    if fail_mode == "fail_close":
+        in_safe = lambda v: v is not None and v <= settle_band
+    elif fail_mode == "fail_open":
+        in_safe = lambda v: v is not None and v >= 100.0 - settle_band
+    else:
+        in_safe = lambda v: v is not None and abs(v - pre_trip_pos) <= fip_drift
+
+    def _frozen_benign(ev):
+        """阀位 frozen 在两种情形下是合法平台而非信号冻结：
+        1) 完全位于跳闸前（阀位在指令保持期本来就恒定）；
+        2) 跳闸后且平台值已在安全位带（机械到位）/ fail-in-place 保持带内。
+        """
+        if ev["channel"] != "position" or ev["kind"] != "frozen":
+            return False
+        # 事件主体在跳闸前（跳闸前保持平台）即视为合法；允许末端略微越过跳闸沿
+        if ev["t_start"] < trip_time and \
+                (ev["t_end"] - trip_time) < 0.5 * (ev["t_end"] - ev["t_start"]):
+            return True
+        mid = (ev["t_start"] + ev["t_end"]) / 2.0
+        k = min(range(len(pos_ts)), key=lambda i: abs(pos_ts[i] - mid))
+        return pos_ts[k] >= trip_time and in_safe(pos_vs[k])
+
+    events_out, platform_events = [], []
+    for ev in all_events:
+        if _frozen_benign(ev):
+            platform_events.append({**ev, "kind": "in_band_platform",
+                                    "detail": ev["detail"] + "；跳闸前保持或阀位已在安全位带内，"
+                                              "判定为合法平台而非信号冻结"})
+        else:
+            events_out.append(ev)
     win_len = max(window_end - trip_time, 1e-9)
     pos_lost = 0.0
     for ev in events_out:
@@ -72,9 +111,9 @@ def _dropouts_in_window(raw_series, trip_time, window_end, coverage_min=0.8):
     gap = None
     if pos_lost / win_len > 1 - coverage_min:
         gap = {"code": "dropout_in_action_window",
-               "detail": f"动作窗内阀位断档/冻结覆盖 {pos_lost / win_len * 100:.0f}%"
+               "detail": f"动作窗内阀位断档/带外冻结覆盖 {pos_lost / win_len * 100:.0f}%"
                          f"（上限 {(1 - coverage_min) * 100:.0f}%），动作曲线不可信"}
-    return events_out, gap
+    return events_out, platform_events, gap
 
 
 def run_failsafe_analysis(db, fs_test_id, author="auto", new_adjustments=None):
@@ -171,6 +210,7 @@ def run_failsafe_analysis(db, fs_test_id, author="auto", new_adjustments=None):
     window_manual = manual_window is not None
 
     metrics, checks, issues, adopted, dropouts_out = {}, [], [], [], []
+    in_band_platforms = []
     align_meta = None
     curves = None
     t_loss = None
@@ -216,13 +256,6 @@ def run_failsafe_analysis(db, fs_test_id, author="auto", new_adjustments=None):
                 t_loss, lead, cmd_base = events.command_loss_time(
                     cmd_ts, cmd_vals, trip_time, thresholds["command_loss_pct"])
 
-                # ---- 动作窗断档 ----
-                dropouts_out, dgap = _dropouts_in_window(
-                    {c: raw[c] for c in ("command", "position", "pressure")},
-                    trip_time, window_end_req, thresholds["baseline_coverage_min"])
-                if dgap:
-                    evidence_gaps.append(dgap)
-
                 # ---- 动作指标 ----
                 mout = motion.analyze_motion(
                     grid, aligned["position"], aligned["pressure"],
@@ -236,6 +269,18 @@ def run_failsafe_analysis(db, fs_test_id, author="auto", new_adjustments=None):
                 evidence_gaps += mout["evidence_gaps"]
                 if "pressure_note" in mout:
                     notes.append(mout["pressure_note"])
+
+                # ---- 动作窗断档（到位恒定平台不算信号冻结） ----
+                dropouts_out, platforms, dgap = _dropouts_in_window(
+                    {c: raw[c] for c in ("command", "position", "pressure")},
+                    trip_time, window_end_req, thresholds["baseline_coverage_min"],
+                    settle_band=thresholds["settle_band_pct"],
+                    fail_mode=payload["fail_mode"],
+                    fip_drift=thresholds["fip_drift_pct_max"],
+                    pre_trip_pos=metrics.get("pre_trip_position_pct", 60.0))
+                in_band_platforms = platforms
+                if dgap:
+                    evidence_gaps.append(dgap)
 
                 # 采用区间：指令先行
                 if t_loss is not None:
@@ -315,6 +360,7 @@ def run_failsafe_analysis(db, fs_test_id, author="auto", new_adjustments=None):
         "issues": issues,
         "adopted_intervals": adopted,
         "dropouts": dropouts_out,
+        "in_band_platforms": in_band_platforms,
         "alignment": align_meta,
         "curves": curves,
         "decision_basis": basis,

@@ -230,20 +230,18 @@ def _analyze_travel(grid, pos, i_trip, i_end, pos0, sgn, target, settle_band,
     i_band = next((i for i in range(i_trip, i_end + 1)
                    if abs(pos[i] - target) <= settle_band), None)
 
-    # ---- 稳定性 ----
+    # ---- 稳定性：以观察窗末端连续在带时长判定（中间允许出现反弹） ----
     settled, stable_tail_s, t_settle = False, 0.0, None
-    if i_band is not None:
-        i = i_band
-        while i <= i_end and abs(pos[i] - target) <= settle_band:
-            i += 1
-        dwell = grid[i - 1] - grid[i_band]
-        if i > i_end and dwell >= thr["settle_dwell_s"]:
+    k = i_end
+    while k >= i_trip and abs(pos[k] - target) <= settle_band:
+        k -= 1
+    i_tail_band = k + 1                      # 窗末连续在带区间起点
+    if i_tail_band <= i_end:
+        stable_tail_s = grid[i_end] - grid[i_tail_band]
+        if stable_tail_s >= thr["settle_dwell_s"]:
             settled = True
-            t_settle = grid[i_band] + thr["settle_dwell_s"]
-        k = i_end
-        while k >= i_trip and abs(pos[k] - target) <= settle_band:
-            k -= 1
-        stable_tail_s = grid[i_end] - grid[k + 1]
+            # 进入稳定平台后保持满 dwell 的时刻
+            t_settle = grid[i_tail_band] + thr["settle_dwell_s"]
 
     metrics["final_position_pct"] = round(pos[i_end], 3)
     metrics["settled"] = settled
