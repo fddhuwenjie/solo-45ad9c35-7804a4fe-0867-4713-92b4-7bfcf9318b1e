@@ -76,6 +76,34 @@ CREATE TABLE IF NOT EXISTS failsafe_trends (
   created_at TEXT NOT NULL,
   result_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS seatleak_tests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  valve_id INTEGER NOT NULL REFERENCES valves(id),
+  phase TEXT NOT NULL,
+  submitted_at TEXT NOT NULL,
+  test_started_at TEXT,
+  flow_direction TEXT NOT NULL,
+  conditions_json TEXT NOT NULL,
+  thresholds_json TEXT NOT NULL,
+  calibration_valid_until TEXT,
+  payload_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS seatleak_analyses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  seatleak_test_id INTEGER NOT NULL REFERENCES seatleak_tests(id),
+  version INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  author TEXT NOT NULL DEFAULT 'auto',
+  adjustments_json TEXT NOT NULL DEFAULT '[]',
+  result_json TEXT NOT NULL,
+  UNIQUE(seatleak_test_id, version)
+);
+CREATE TABLE IF NOT EXISTS seatleak_comparisons (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  valve_id INTEGER,
+  created_at TEXT NOT NULL,
+  result_json TEXT NOT NULL
+);
 """
 
 
@@ -294,6 +322,103 @@ class Database:
     def get_failsafe_trend(self, trend_id):
         row = self._conn.execute(
             "SELECT * FROM failsafe_trends WHERE id=?", (trend_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["result"] = json.loads(d.pop("result_json"))
+        return d
+
+    # ---- 阀座密封保持试验 ----
+    def create_seatleak_test(self, valve_id, phase, test_started_at, flow_direction,
+                             conditions, thresholds, calibration_valid_until, payload):
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """INSERT INTO seatleak_tests(valve_id, phase, submitted_at, test_started_at,
+                   flow_direction, conditions_json, thresholds_json,
+                   calibration_valid_until, payload_json)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (valve_id, phase, _now(), test_started_at, flow_direction,
+                 json.dumps(conditions), json.dumps(thresholds),
+                 calibration_valid_until, json.dumps(payload)))
+            return cur.lastrowid
+
+    def get_seatleak_test(self, sl_test_id):
+        row = self._conn.execute(
+            "SELECT * FROM seatleak_tests WHERE id=?", (sl_test_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["conditions"] = json.loads(d.pop("conditions_json"))
+        d["thresholds"] = json.loads(d.pop("thresholds_json"))
+        d["payload"] = json.loads(d.pop("payload_json"))
+        return d
+
+    def list_seatleak_tests(self, valve_id=None):
+        q = ("SELECT id, valve_id, phase, submitted_at, test_started_at, flow_direction "
+             "FROM seatleak_tests")
+        args = ()
+        if valve_id is not None:
+            q += " WHERE valve_id=?"
+            args = (valve_id,)
+        return [dict(r) for r in self._conn.execute(q + " ORDER BY id", args)]
+
+    # ---- 阀座密封试验分析版本 ----
+    def create_seatleak_analysis(self, sl_test_id, author, adjustments, result):
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(version),0) AS v FROM seatleak_analyses "
+                "WHERE seatleak_test_id=?", (sl_test_id,)).fetchone()
+            version = row["v"] + 1
+            cur = self._conn.execute(
+                """INSERT INTO seatleak_analyses(seatleak_test_id, version, created_at, author,
+                   adjustments_json, result_json) VALUES(?,?,?,?,?,?)""",
+                (sl_test_id, version, _now(), author,
+                 json.dumps(adjustments), json.dumps(result)))
+            return cur.lastrowid, version
+
+    def get_seatleak_analysis(self, analysis_id):
+        row = self._conn.execute(
+            "SELECT * FROM seatleak_analyses WHERE id=?", (analysis_id,)).fetchone()
+        return self._sl_analysis_row(row)
+
+    def list_seatleak_analyses(self, sl_test_id):
+        rows = self._conn.execute(
+            """SELECT id, seatleak_test_id, version, created_at, author
+               FROM seatleak_analyses WHERE seatleak_test_id=? ORDER BY version""",
+            (sl_test_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def latest_seatleak_analysis_ids(self, valve_id):
+        """同阀门每个阀座试验的最新分析版本，按试验时间排序。"""
+        rows = self._conn.execute(
+            """SELECT t.id AS tid,
+                      COALESCE(t.test_started_at, t.submitted_at) AS ttime,
+                      (SELECT a.id FROM seatleak_analyses a
+                       WHERE a.seatleak_test_id=t.id ORDER BY a.version DESC LIMIT 1) AS aid
+               FROM seatleak_tests t WHERE t.valve_id=?
+               ORDER BY ttime, t.id""", (valve_id,)).fetchall()
+        return [(r["tid"], r["aid"], r["ttime"]) for r in rows if r["aid"] is not None]
+
+    @staticmethod
+    def _sl_analysis_row(row):
+        if not row:
+            return None
+        d = dict(row)
+        d["adjustments"] = json.loads(d.pop("adjustments_json"))
+        d["result"] = json.loads(d.pop("result_json"))
+        return d
+
+    # ---- 阀座密封试验比较 ----
+    def create_seatleak_comparison(self, valve_id, result):
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """INSERT INTO seatleak_comparisons(valve_id, created_at, result_json)
+                   VALUES(?,?,?)""", (valve_id, _now(), json.dumps(result)))
+            return cur.lastrowid
+
+    def get_seatleak_comparison(self, comparison_id):
+        row = self._conn.execute(
+            "SELECT * FROM seatleak_comparisons WHERE id=?", (comparison_id,)).fetchone()
         if not row:
             return None
         d = dict(row)

@@ -66,20 +66,30 @@ def _norm_signal(points, unit, range_min, range_max, range_unit, channel):
 
 def _norm_pressure(points, unit):
     """压力统一为 kPa。返回 (values_kpa, notes, conflicts)。"""
+    return normalize_pressure(points, unit, "pressure")
+
+
+def normalize_signal(points, unit, range_min, range_max, range_unit, channel):
+    """公开版：单路指令/阀位信号归一化为量程百分比（供阀座试验等通道名不同的场景复用）。"""
+    return _norm_signal(points, unit, range_min, range_max, range_unit, channel)
+
+
+def normalize_pressure(points, unit, channel="pressure"):
+    """公开版：任意压力通道统一为 kPa，冲突信息携带通道名。"""
     u = (unit or "").strip().lower()
     notes, conflicts = [], []
     vals = [float(p[1]) for p in points]
     if not vals:
-        conflicts.append("pressure: 采样点为空")
+        conflicts.append(f"{channel}: 采样点为空")
         return [], notes, conflicts
     factor = PRESSURE_TO_KPA.get(u)
     if factor is None:
-        conflicts.append(f"pressure: 不支持的压力单位 {unit!r}")
+        conflicts.append(f"{channel}: 不支持的压力单位 {unit!r}")
         return vals, notes, conflicts
     if factor != 1.0:
-        notes.append(f"pressure: {unit} 已换算为 kPa")
+        notes.append(f"{channel}: {unit} 已换算为 kPa")
     if min(vals) < 0.0:
-        conflicts.append(f"pressure: 出现负压力 {min(vals):.2f} {unit}")
+        conflicts.append(f"{channel}: 出现负压力 {min(vals):.2f} {unit}")
     return [v * factor for v in vals], notes, conflicts
 
 
