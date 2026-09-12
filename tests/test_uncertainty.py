@@ -130,9 +130,11 @@ def test_fixed_seed_reproducible(client):
 
 # ---- 区间跨阈值：indeterminate ----
 
+# ---- 区间跨阈值：顶层 verdict / 打印页结论必须为 indeterminate ----
+
 def test_straddling_interval_is_indeterminate_not_pass(client):
     """区间与阈值的相对位置与状态严格一致：跨阈值（含贴限）必须 indeterminate。"""
-    tid = submit(client, load_sample("sample_normal"))
+    tid = submit_bare(client, "sample_normal")
     unc = {
         "channels": {"position": {
             "resolution": {"kind": "resolution", "value": 2.0, "unit": "%"},
@@ -155,6 +157,99 @@ def test_straddling_interval_is_indeterminate_not_pass(client):
             assert e["status"] == "indeterminate"
             saw_straddle = True
     assert saw_straddle, "大扰动下至少应有一个指标区间跨越限值"
+
+
+def test_top_verdict_and_report_indeterminate_when_interval_straddles(client):
+    """反例：中心值全部合格但死区区间跨越 2% 限值。
+
+    verdict 必须从 ok 改为 indeterminate，打印页顶部结论同步显示“不确定”，
+    不能继续显示 ok/“正常”。
+    """
+    tid = submit_bare(client, "sample_normal")
+    unc = {
+        "channels": {"position": {
+            "resolution": {"kind": "resolution", "value": 1.6, "unit": "%"},
+            "accuracy": {"kind": "accuracy", "value": 1.2, "unit": "%"}}},
+        "n_samples": 80, "seed": 7,
+    }
+    a = analyze(client, tid, unc)
+    res = a["result"]
+    u = res["uncertainty"]
+    # 中心值本身合格（否则不构成“只按中心值通过”的反例）
+    assert res["metrics"]["deadband"]["max_pct"] < u["metrics"]["deadband"]["threshold"]
+    # 死区区间跨越限值，总体符合性不确定，且没有任何指标整段 fail
+    dead = u["metrics"]["deadband"]
+    assert dead["interval"][0] <= dead["threshold"] <= dead["interval"][1]
+    assert u["overall_status"] == "indeterminate"
+    assert all(e["status"] != "fail" for e in u["metrics"].values() if e["interval"])
+    # 顶层 verdict 必须与 overall_status 一致
+    assert res["verdict"] == "indeterminate"
+    assert any(i["kind"] == "uncertainty_indeterminate" for i in res["issues"])
+    # 打印页顶部结论
+    page = client.get(f"/analyses/{a['id']}/report").text
+    assert "符合性不确定" in page
+    assert '结论</b>：<span class="verdict">正常</span>' not in page
+    # JSON 导出同样为 indeterminate
+    exp = client.get(f"/analyses/{a['id']}/export").json()
+    assert exp["result"]["verdict"] == "indeterminate"
+
+
+def test_small_uncertainty_keeps_verdict_ok(client):
+    """对照：不确定度足够小时区间整体在限内，verdict 仍为 ok。"""
+    tid = submit_bare(client, "sample_normal")
+    unc = {"channels": {"position": {
+        "resolution": {"kind": "resolution", "value": 0.2, "unit": "%"},
+        "accuracy": {"kind": "accuracy", "value": 0.1, "unit": "%"}}},
+        "n_samples": 60, "seed": 7}
+    res = analyze(client, tid, unc)["result"]
+    assert res["uncertainty"]["overall_status"] == "pass"
+    assert res["verdict"] == "ok"
+
+
+# ---- resolution 均匀扰动半宽 = 声明量化步进 / 2 ----
+
+def test_resolution_halfwidth_is_value_over_two(client):
+    """resolution=0.2%（量化步进）必须产生 ±0.1%（value/2）扰动，而非 ±0.2%。"""
+    tid = submit_bare(client, "sample_normal")
+    unc = {"channels": {"position": {
+        "resolution": {"kind": "resolution", "value": 0.2, "unit": "%"}}},
+        "n_samples": 40, "seed": 1}
+    u = analyze(client, tid, unc)["result"]["uncertainty"]
+    comp = next(c for c in u["components"]
+                if c["channel"] == "position" and c["kind"] == "resolution")
+    assert comp["normalized_scale"] == 0.2       # 声明量化步进
+    assert comp["perturbation_halfwidth"] == 0.1  # 实际均匀扰动半宽 = value/2
+    assert comp["distribution"] == "rectangular"
+
+
+def test_resolution_perturbation_bounded_by_half_step():
+    """逐点扰动幅度不得超过量化步进的一半（±value/2）。"""
+    import random
+    from app.uncertainty import _perturb_channel
+    cin = {"components": [{"kind": "resolution", "scale": 0.1,
+                           "distribution": "rectangular", "per_point": True}],
+           "time_jitter_s": 0.0}
+    ts = [float(i) for i in range(200)]
+    vs = [50.0] * 200
+    rng = random.Random(123)
+    for _ in range(50):
+        _, perturbed = _perturb_channel(ts, vs, cin, rng)
+        assert max(abs(v - 50.0) for v in perturbed) <= 0.1 + 1e-12
+
+
+def test_resolution_halfwidth_avoids_inflated_intervals(client):
+    """反例：同样 0.2% 分辨率声明，修正后的区间不得宽于旧实现（±0.2%）。
+
+    用固定种子对比死区区间宽度上界：半宽折半后所有指标区间应收敛在更窄范围。
+    """
+    tid = submit_bare(client, "sample_normal")
+    unc_half = {"channels": {"position": {
+        "resolution": {"kind": "resolution", "value": 0.2, "unit": "%"}}},
+        "n_samples": 80, "seed": 7}
+    u = analyze(client, tid, unc_half)["result"]["uncertainty"]
+    over = u["metrics"]["overshoot"]["interval"]
+    # ±0.1% 点间扰动下，过冲区间宽度不应超过 0.3%（旧 ±0.2% 实现会更宽）
+    assert over[1] - over[0] < 0.3
 
 
 def test_conformance_boundary_touch_is_indeterminate():

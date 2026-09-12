@@ -6,8 +6,9 @@
 
 设计约定：
 - 分辨率/准确度/零点漂移为**每重采样一次**的系统性抽样（均匀分布），
-  分辨率按量化步进 value/2 为半宽，点间独立；准确度、零点漂移按次整体偏置，
-  叠加与量化一致的 ±半宽 抽样；校准标准不确定度按次正态抽样。
+  分辨率声明值为量化步进，扰动半宽取步进的一半（resolution=0.2% → ±0.1%，
+  点间独立）；准确度、零点漂移按次整体偏置，叠加与声明半宽一致的
+  ±半宽 抽样；校准标准不确定度按次正态抽样。
 - 采样时间抖动为**通道时钟偏差**：每通道每重采样一次一个时钟偏置（正态），
   叠加各点独立抖动，重新对齐即完成重采样。
 - 固定随机种子；同输入、同复算参数必须可复现。
@@ -134,6 +135,11 @@ def _build_channel_inputs(raw_norm, source_units, rng_spec, cal):
             return
         if scale <= 0:
             return
+        declared_scale = scale
+        # resolution 的声明值为量化步进（如 0.2%），均匀量化的扰动半宽为步进/2
+        # （±0.1%）；accuracy/zero_drift 的声明值本身即允许误差半宽，不折半。
+        if comp["kind"] == "resolution":
+            scale = scale / 2.0
         inputs[channel]["components"].append({
             "kind": comp["kind"], "scale": scale, "distribution": distribution,
             "per_point": comp["kind"] == "resolution",
@@ -142,7 +148,8 @@ def _build_channel_inputs(raw_norm, source_units, rng_spec, cal):
             "channel": channel, "kind": comp["kind"], "source": source,
             "declared": {"value": comp["value"], "unit": comp["unit"],
                          "distribution": distribution},
-            "normalized_scale": round(scale, 6),
+            "normalized_scale": round(declared_scale, 6),
+            "perturbation_halfwidth": round(scale, 6),
             "normalized_unit": "kPa" if channel == "pressure" else (
                 "s" if comp["unit"].strip().lower() == "s" else "%_of_span"),
             "distribution": distribution,

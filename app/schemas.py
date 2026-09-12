@@ -53,7 +53,8 @@ UNCERTAINTY_COMPONENT_UNITS = (
 class UncertaintyComponent(BaseModel):
     """一个不确定度输入分量。
 
-    - resolution 分辨率：按均匀分布，半宽 = 声明值 / 2（量化步进）；
+    - resolution 分辨率：声明值为量化步进（量化宽度），按均匀分布，
+      扰动半宽 = 声明值 / 2（如 resolution=0.2% → ±0.1%）；
     - accuracy 准确度：默认均匀分布（声明值为允许误差限/半宽）；
     - zero_drift 零点漂移：默认均匀分布（声明值为漂移限/半宽）；
     - calibration 校准标准不确定度：默认正态分布（声明值即 1σ 标准不确定度）。

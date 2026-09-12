@@ -250,6 +250,25 @@ def run_analysis(db, test_id, author="auto", new_adjustments=None,
             "travel_time": m_travel, "deadband": m_dead, "hysteresis": m_hyst,
             "overshoot": m_over, "steady_state": m_ss,
         })
+    # 顶层判定须与不确定度总体符合性一致：任一指标区间跨越判定阈值时
+    # 不得只按中心值给出 ok；区间整体超限时同步标 exceedances。
+    # 阻断（no_conclusion）优先级最高，保持不变。
+    if not blocking and uncertainty_block.get("status") == "evaluated":
+        overall = uncertainty_block.get("overall_status")
+        if overall == "indeterminate" and verdict == "ok":
+            verdict = "indeterminate"
+            if not issues:
+                issues.append({
+                    "kind": "uncertainty_indeterminate",
+                    "detail": "测量不确定度区间跨越判定阈值（含贴限），符合性不确定，"
+                              "不得只按中心值判为正常",
+                    "value": None, "threshold": None, "periods": []})
+        elif overall == "fail" and verdict == "ok":
+            verdict = "exceedances"
+            issues.append({
+                "kind": "uncertainty_exceedance",
+                "detail": "蒙特卡洛区间整体越过判定阈值，即使中心值在限内也判超限",
+                "value": None, "threshold": None, "periods": []})
     # 阻断（单位冲突/校准失效/关键区段缺失）时不得据此给符合性结论
     if blocking and uncertainty_block.get("status") == "evaluated":
         uncertainty_block = {

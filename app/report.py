@@ -8,7 +8,8 @@ import html
 
 SEG_COLORS = {"opening": "#dbeafe", "closing": "#ffedd5", "dwell": "#f3f4f6"}
 SEG_NAMES = {"opening": "开阀", "closing": "关阀", "dwell": "停留"}
-VERDICT_NAMES = {"ok": "正常", "exceedances": "存在超限", "no_conclusion": "不得用于结论"}
+VERDICT_NAMES = {"ok": "正常", "exceedances": "存在超限", "no_conclusion": "不得用于结论",
+                 "indeterminate": "符合性不确定（测量不确定度区间跨越限值）"}
 UNC_STATUS_NAMES = {
     "pass": ("区间合格", "ok"),
     "fail": ("区间超限", "bad"),
@@ -250,6 +251,8 @@ def render_report(analysis, test, valve):
         f'共 {len(e["original_points"])} 点，理由：{esc(e["reason"])}</li>'
         for e in r["exclusions"]) or "<li>无</li>"
 
+    verdict_bg = {"ok": "#d1fae5", "no_conclusion": "#fee2e2"}.get(
+        r["verdict"], "#fef3c7")
     return f"""<!DOCTYPE html>
 <html lang="zh"><head><meta charset="utf-8"/>
 <title>阀门诊断报告 {esc(valve['tag'])} 测试#{test['id']} v{analysis['version']}</title>
@@ -262,7 +265,7 @@ def render_report(analysis, test, valve):
  .ok {{ color: #059669; font-weight: 600; }} .bad {{ color: #dc2626; font-weight: 600; }}
  .warn {{ color: #d97706; }} .reason {{ font-size: 11px; color: #4b5563; }}
  .verdict {{ display: inline-block; padding: 2px 10px; border-radius: 4px; font-weight: 700;
-   background: {'#d1fae5' if r['verdict'] == 'ok' else ('#fee2e2' if r['verdict'] == 'no_conclusion' else '#fef3c7')}; }}
+   background: {verdict_bg}; }}
  .meta td {{ border: none; padding: 2px 12px 2px 0; }}
  ul {{ font-size: 12px; margin: 6px 0; }}
  @media print {{ body {{ margin: 8mm; }} h2 {{ page-break-after: avoid; }} svg {{ max-width: 100%; }} }}
