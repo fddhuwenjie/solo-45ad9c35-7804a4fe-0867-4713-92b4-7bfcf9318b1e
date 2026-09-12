@@ -6,6 +6,9 @@
 """
 
 import html
+import json
+
+from ..calibration_report import render_calibration_section
 
 VERDICT_NAMES = {"pass": "合格", "fail": "推力/摩擦超限", "no_conclusion": "证据不足，不得判定"}
 PHASE_CN = {"breakaway": "启程", "unseat": "离座", "running": "匀速",
@@ -209,14 +212,21 @@ def render_thrust_report(analysis, test, valve):
         + (f"（时段：{', '.join(f'{a}–{b}s' for a, b in i.get('periods', []))}）"
            if i.get("periods") else "") + "</li>"
         for i in r.get("issues", [])) or "<li>无</li>"
-    adjustments = "".join(
-        f"<li>v{analysis['version']} / {esc(a.get('author', ''))}："
-        + (f"移动 {a['run']}.{PHASE_CN.get(a['phase'], a['phase'])}.{a['boundary']} "
-           f"→ {a['new_time']}s"
-           if a["type"] == "segment_move"
-           else f"屏蔽 {a['channel']} #{a['start_index']}–#{a['end_index']}")
-        + f"（{esc(a.get('reason', ''))}）</li>"
-        for a in analysis["adjustments"]) or "<li>无（自动分析）</li>"
+    def _adj_line(a):
+        if a["type"] == "segment_move":
+            body = (f"移动 {a['run']}.{PHASE_CN.get(a['phase'], a['phase'])}."
+                    f"{a['boundary']} → {a['new_time']}s")
+        elif a["type"] == "calibration_rebind":
+            body = ("改绑逐通道校准版本 "
+                    + json.dumps(a.get("bindings", {}), ensure_ascii=False)
+                    + "（派生新版本，旧分析冻结版本不变）")
+        else:
+            body = f"屏蔽 {a['channel']} #{a['start_index']}–#{a['end_index']}"
+        return (f"<li>v{analysis['version']} / {esc(a.get('author', ''))}：{body}"
+                f"（{esc(a.get('reason', ''))}）</li>")
+
+    adjustments = "".join(_adj_line(a) for a in analysis["adjustments"]) \
+        or "<li>无（自动分析）</li>"
     basis = "".join(f"<li>{esc(b)}</li>" for b in r.get("decision_basis", [])) or "<li>—</li>"
     exclusions_detail = "".join(
         f'<li>{esc(e["channel"])} 原始点 #{e["start_index"]}–#{e["end_index"]}，'
@@ -287,6 +297,8 @@ def render_thrust_report(analysis, test, valve):
 
 <h2>异常区间（含卡涩来源嫌疑）</h2>
 <ul>{issues}</ul>
+
+{render_calibration_section(r)}
 
 <h2>证据缺口（存在时不得给出维修结论）</h2>
 <ul>{gaps}</ul>

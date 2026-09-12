@@ -3,8 +3,11 @@
 仅在执行器结构（类型/阀杆方向）、有效面积（±2%）、弹簧版本和负载条件
 （load/medium）兼容时才比较推力指标；存在证据缺口的版本不参与定量比较。
 不可比原因逐条列出；可比时给出启动力、运行摩擦、摩擦带、离座力、落座力的
-变化（delta 正值表示改善，即摩擦力/超限力减小或落座裕量增大）。
+变化（delta 正值表示改善，即摩擦力/超限力减小或落座裕量增大）。比较结果
+同时汇总逐通道校准链：采用证书（序列号/摘要）、修正量变化与拒绝原因。
 """
+
+from .. import calibration as calchain
 
 # (结果取值键, 名称, 单位, 劣化方向 +1 越大越差 / -1 越小越差, 相对容差, 绝对容差)
 TREND_METRICS = [
@@ -120,6 +123,26 @@ def compare_thrust_tests(db, analysis_ids=None, valve_tag=None):
         if r["verdict"] == "no_conclusion":
             gaps = "；".join(sorted({g["code"] for g in r["evidence_gaps"]}))
             entry["reasons"].append(f"该版本存在证据缺口（{gaps}），数值不参与比较")
+        chain = r.get("calibration_chain") or {}
+        if chain.get("mode") == "channel_chain":
+            entry["calibration"] = {
+                "accepted": chain.get("accepted"),
+                "certificates": [
+                    {"channel": c["channel"],
+                     "instrument_serial": c.get("instrument_serial"),
+                     "calibration_version_id": c.get("calibration_version_id"),
+                     "certificate_digest": c.get("certificate_digest"),
+                     "mean_correction": c.get("mean_correction"),
+                     "status": c.get("status"),
+                     "rejection_code": c.get("rejection_code")}
+                    for c in chain.get("channels", [])],
+            }
+            if not chain.get("accepted"):
+                entry["reasons"].append(
+                    "该版本存在被拒绝的校准通道（"
+                    + "、".join(f"{x['channel']}:{x['code']}"
+                               for x in chain.get("rejections", []))
+                    + "），数值不参与比较")
         entry["comparable"] = not entry["reasons"]
         if not entry["comparable"]:
             incomparable.append({"test_id": t["id"], "analysis_id": a["id"],
@@ -151,6 +174,7 @@ def compare_thrust_tests(db, analysis_ids=None, valve_tag=None):
         "valve_tag": valve["tag"] if valve else None,
         "valve_id": ref_t["valve_id"],
         "compatible": not incomparable and len(comparable) >= 2,
+        "calibration_comparison": calchain.compare_chains(ref_r, items[-1][2]),
         "frozen_conditions": {
             "reference_test_id": ref_t["id"],
             "actuator_type": (ref_r.get("actuator") or {}).get("actuator_type"),

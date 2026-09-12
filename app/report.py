@@ -6,6 +6,8 @@
 
 import html
 
+from .calibration_report import render_calibration_section
+
 SEG_COLORS = {"opening": "#dbeafe", "closing": "#ffedd5", "dwell": "#f3f4f6"}
 SEG_NAMES = {"opening": "开阀", "closing": "关阀", "dwell": "停留"}
 VERDICT_NAMES = {"ok": "正常", "exceedances": "存在超限", "no_conclusion": "不得用于结论",
@@ -283,6 +285,8 @@ def render_report(analysis, test, valve):
 
 <h2>指标与阈值</h2>
 {_metrics_table(r)}
+
+{render_calibration_section(r)}
 
 {_uncertainty_section(r)}
 

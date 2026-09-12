@@ -116,9 +116,14 @@ def _calibration_range_to_pct(cal, channel, series_units, span, range_min):
 
 # ===================== 输入装配 =====================
 
-def _build_channel_inputs(raw_norm, source_units, rng_spec, cal):
+def _build_channel_inputs(raw_norm, source_units, rng_spec, cal,
+                          calibration_components=None):
     """把声明分量装配为每通道扰动参数。
 
+    calibration_components: 逐通道校准链冻结版本的标准不确定度分量
+    [{channel, value, unit, distribution="normal", instrument_serial,
+      calibration_version_id}, ...]。仅当该通道在显式输入中没有声明
+    calibration 分量、也没有统一 calibration 块覆盖时才注入，避免重复计列。
     返回 (channel_inputs, component_records, reasons)。
     任一分量单位冲突 → 整体无效（reasons 非空）。
     """
@@ -205,6 +210,43 @@ def _build_channel_inputs(raw_norm, source_units, rng_spec, cal):
                     r["coverage"] = {"min": round(lo, 4), "max": round(hi, 4),
                                      "observed_min": round(obs_lo, 4),
                                      "observed_max": round(obs_hi, 4)}
+
+    # 逐通道校准链冻结版本的标准不确定度（链模式）。仅在显式输入未为该通道
+    # 声明校准分量、且无统一 calibration 块覆盖时注入，避免同一影响重复计列。
+    explicit_channels = set()
+    if cal:
+        explicit_channels.update(cal.get("applies_to") or CHANNELS)
+    for cc in (calibration_components or []):
+        ch = cc.get("channel")
+        if ch not in CHANNELS:
+            continue
+        if ch in explicit_channels:
+            continue
+        if any(r["channel"] == ch and r["kind"] == "calibration" for r in records):
+            continue
+        comp = {"kind": "calibration", "value": cc["value"], "unit": cc.get("unit"),
+                "distribution": cc.get("distribution", "normal")}
+        try:
+            scale, distribution = _component_normalized(comp, ch, span)
+        except ValueError as e:
+            reasons.append(f"校准链标准不确定度冲突：{e}")
+            continue
+        if scale <= 0:
+            continue
+        inputs[ch]["components"].append({
+            "kind": "calibration", "scale": scale, "distribution": distribution,
+            "per_point": False})
+        records.append({
+            "channel": ch, "kind": "calibration", "source": "calibration_chain",
+            "declared": {"value": cc["value"], "unit": cc.get("unit"),
+                         "distribution": distribution},
+            "normalized_scale": round(scale, 6),
+            "perturbation_halfwidth": round(scale, 6),
+            "normalized_unit": "kPa" if ch == "pressure" else "%_of_span",
+            "distribution": distribution,
+            "instrument_serial": cc.get("instrument_serial"),
+            "calibration_version_id": cc.get("calibration_version_id"),
+        })
     return inputs, records, reasons
 
 
@@ -425,25 +467,28 @@ def not_evaluated(reason="未提供测量不确定度输入分量（分辨率/�
 
 
 def evaluate(raw_norm, source_units, range_spec, thresholds, manual_boundaries,
-             input_spec, central_metrics=None):
+             input_spec, central_metrics=None, calibration_components=None):
     """执行蒙特卡洛不确定度评估。
 
     raw_norm: normalize_series 的输出（含 command/position/pressure 的 (ts, vs)）
     input_spec: UncertaintyInput.model_dump() 或 None
-    central_metrics: 中心值分析的 metrics dict（用于 not_applicable 对照与展示）
+    calibration_components: 逐通道校准链冻结版本的标准不确定度分量（链模式），
+    无显式输入时据此自动评估；central_metrics: 中心值分析的 metrics dict。
     返回不确定度结果块（见 README/导出 JSON）。
     """
-    if not input_spec:
+    if not input_spec and not calibration_components:
         return not_evaluated()
 
-    n_samples = int(input_spec.get("n_samples") or DEFAULT_N_SAMPLES)
-    seed = int(input_spec.get("seed", DEFAULT_SEED))
-    prob = float(input_spec.get("interval_prob") or DEFAULT_INTERVAL_PROB)
+    n_samples = int((input_spec or {}).get("n_samples") or DEFAULT_N_SAMPLES)
+    seed = int((input_spec or {}).get("seed", DEFAULT_SEED))
+    prob = float((input_spec or {}).get("interval_prob") or DEFAULT_INTERVAL_PROB)
     rng_spec = {"min": range_spec["min"], "max": range_spec["max"],
-                "channels": input_spec.get("channels") or {}}
+                "channels": (input_spec or {}).get("channels") or {}}
 
     channel_inputs, components, reasons = _build_channel_inputs(
-        raw_norm, source_units, rng_spec, input_spec.get("calibration"))
+        raw_norm, source_units, rng_spec,
+        (input_spec or {}).get("calibration"),
+        calibration_components=calibration_components)
 
     if reasons:
         return {
@@ -556,7 +601,7 @@ def evaluate(raw_norm, source_units, range_spec, thresholds, manual_boundaries,
         "resample_failures": fail_detail,
         "seed": seed,
         "interval_prob": prob,
-        "note": input_spec.get("note", ""),
+        "note": (input_spec or {}).get("note", ""),
         "recompute_params": _recompute_params(n_samples, seed, prob, manual_boundaries),
     }
 
@@ -571,7 +616,7 @@ def _resolved_input(input_spec):
         "n_samples": int(input_spec.get("n_samples") or DEFAULT_N_SAMPLES),
         "seed": int(input_spec.get("seed", DEFAULT_SEED)),
         "interval_prob": float(input_spec.get("interval_prob") or DEFAULT_INTERVAL_PROB),
-        "note": input_spec.get("note", ""),
+        "note": (input_spec or {}).get("note", ""),
     }
 
 

@@ -8,6 +8,7 @@ import json
 from datetime import datetime, timezone
 
 from .processing import alignment, detection, metrics, segmentation, units
+from . import calibration as calchain
 from . import uncertainty as unc
 
 
@@ -86,12 +87,15 @@ def _resolve_uncertainty_input(payload, prev_result, override):
 
 
 def run_analysis(db, test_id, author="auto", new_adjustments=None,
-                 uncertainty_override=None):
+                 uncertainty_override=None, bindings_override=None):
     """执行分析并保存新版本。
 
     new_adjustments: 本次新增的 boundary_moves/exclusions。
     uncertainty_override: AnalyzeRequest 中本次指定的不确定度评估输入（dict）；
     缺省时沿用测试提交 payload 中的声明，两者都没有则指标标为未评估。
+    bindings_override: 本次分析冻结的逐通道校准绑定（dict 或 None）；
+    缺省沿用上一版本实际采用的绑定，再缺省用测试提交声明。改绑派生新版本，
+    旧分析的冻结版本不变。
     人工移动分析边界/剔除点后重算会另存新版本，不确定度区间随该版本独立保存。
     """
     test = db.get_test(test_id)
@@ -120,22 +124,40 @@ def run_analysis(db, test_id, author="auto", new_adjustments=None,
     # 1. 剔除无效点（保留原始点引用）
     filtered, exclusion_records = _apply_exclusions(payload["series"], exclusions)
 
+    # 1b. 逐通道仪器校准链（先按证书点列分段线性修正，再进入单位/对齐/指标）
+    bindings = calchain.resolve_bindings(payload, prev_result, bindings_override)
+    if new_adjustments.get("calibration_bindings") is not None:
+        cumulative.append(calchain.rebind_adjustment(
+            author, new_adjustments["calibration_bindings"]))
+    corrected, chain_block = calchain.apply_chain(
+        db, test_kind="fullstroke",
+        series=filtered, bindings=bindings,
+        test_started_at=payload.get("test_started_at"),
+        submitted_at=test["submitted_at"],
+        range_min=payload["range"]["min"], range_max=payload["range"]["max"])
+    series_for_units = corrected if corrected is not None else filtered
+
     # 2. 单位统一
     rng = payload["range"]
-    norm = units.normalize_series(filtered, rng["min"], rng["max"], rng["unit"])
+    norm = units.normalize_series(series_for_units, rng["min"], rng["max"], rng["unit"])
     raw_norm = {c: norm[c] for c in ("command", "position", "pressure")}
 
     blocking = [f"单位冲突：{c}" for c in norm["conflicts"]]
+    # 链模式：任一通道被拒（证书失效/跨期/量程/点列/单位/未绑定）→ 不得形成结论
+    if chain_block["mode"] == "channel_chain":
+        blocking += chain_block["blocking_issues"]
 
-    # 3. 校准有效期
-    cal_until = _parse_time(payload.get("calibration_valid_until"))
-    test_time = _parse_time(payload.get("test_started_at")) or _parse_time(test["submitted_at"])
-    if cal_until is None:
-        blocking.append("未提供校准有效期，无法确认仪表校准状态")
-    elif test_time and cal_until < test_time:
-        blocking.append(
-            f"校准已于 {payload['calibration_valid_until']} 失效，测试时间 "
-            f"{payload.get('test_started_at') or test['submitted_at']} 晚于有效期")
+    # 3. 校准有效期（legacy 模式沿用旧的单一有效期字段；链模式已逐通道核验）
+    if chain_block["mode"] == "legacy":
+        cal_until = _parse_time(payload.get("calibration_valid_until"))
+        test_time = _parse_time(payload.get("test_started_at")) or _parse_time(test["submitted_at"])
+        if cal_until is None:
+            blocking.append("未提供校准有效期，无法确认仪表校准状态")
+        elif test_time and cal_until < test_time:
+            blocking.append(
+                f"校准已于 {payload['calibration_valid_until']} 失效，测试时间 "
+                f"{payload.get('test_started_at') or test['submitted_at']} 晚于有效期")
+        chain_block["legacy_calibration_valid_until"] = payload.get("calibration_valid_until")
 
     # 4. 时间对齐
     grid, aligned, align_meta = alignment.align(raw_norm)
@@ -246,6 +268,8 @@ def run_analysis(db, test_id, author="auto", new_adjustments=None,
         thresholds=thresholds,
         manual_boundaries=boundary_moves,
         input_spec=unc_input,
+        calibration_components=(chain_block.get("calibration_components")
+                                 if chain_block["mode"] == "channel_chain" else None),
         central_metrics={
             "travel_time": m_travel, "deadband": m_dead, "hysteresis": m_hyst,
             "overshoot": m_over, "steady_state": m_ss,
@@ -283,6 +307,7 @@ def run_analysis(db, test_id, author="auto", new_adjustments=None,
         "test_id": test_id,
         "verdict": verdict,
         "blocking_issues": blocking,
+        "calibration_chain": chain_block,
         "unit_notes": norm["notes"],
         "alignment": align_meta,
         "segments": segments,

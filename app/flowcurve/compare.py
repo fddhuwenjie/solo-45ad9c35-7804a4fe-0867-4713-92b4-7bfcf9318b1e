@@ -3,8 +3,11 @@
 只有**阀内件（trim）、介质（名称/密度/饱和蒸气压）、流向、流量计量程**
 一致的测次才允许叠加到同一 Cv-阀位图上；铭牌特性与额定 Cv 作为冻结基准
 一并展示。存在证据缺口（no_conclusion）的版本不参与定量比较，只列原因。
-输出叠加采用点、容量系数与残差带趋势（退化/改善/稳定）。
+输出叠加采用点、容量系数与残差带趋势（退化/改善/稳定）。比较结果同时汇总
+逐通道校准链：采用证书（序列号/摘要）、修正量变化与拒绝原因。
 """
+
+from .. import calibration as calchain
 
 # (结果取值键, 名称, 单位, 劣化方向, 相对容差, 绝对容差)
 TREND_METRICS = [
@@ -125,6 +128,26 @@ def compare_flowcurve_tests(db, analysis_ids=None, valve_tag=None):
         if r["verdict"] == "no_conclusion":
             gaps = "；".join(sorted({g["code"] for g in r.get("evidence_gaps", [])}))
             entry["reasons"].append(f"该版本存在证据缺口（{gaps}），数值不参与比较")
+        chain = r.get("calibration_chain") or {}
+        if chain.get("mode") == "channel_chain":
+            entry["calibration"] = {
+                "accepted": chain.get("accepted"),
+                "certificates": [
+                    {"channel": c["channel"],
+                     "instrument_serial": c.get("instrument_serial"),
+                     "calibration_version_id": c.get("calibration_version_id"),
+                     "certificate_digest": c.get("certificate_digest"),
+                     "mean_correction": c.get("mean_correction"),
+                     "status": c.get("status"),
+                     "rejection_code": c.get("rejection_code")}
+                    for c in chain.get("channels", [])],
+            }
+            if not chain.get("accepted"):
+                entry["reasons"].append(
+                    "该版本存在被拒绝的校准通道（"
+                    + "、".join(f"{x['channel']}:{x['code']}"
+                               for x in chain.get("rejections", []))
+                    + "），数值不参与比较")
         entry["comparable"] = not entry["reasons"]
         if not entry["comparable"]:
             incomparable.append({"test_id": t["id"], "analysis_id": a["id"],
@@ -186,6 +209,7 @@ def compare_flowcurve_tests(db, analysis_ids=None, valve_tag=None):
         "valve_tag": valve["tag"] if valve else None,
         "valve_id": ref_t["valve_id"],
         "compatible": len(incomparable) == 0 and len(comparable_ids) >= 2,
+        "calibration_comparison": calchain.compare_chains(ref_r, items[-1][2]),
         "frozen_conditions": {
             "reference_test_id": ref_t["id"],
             "trim": ref_r["valve"].get("trim"),

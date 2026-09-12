@@ -17,6 +17,7 @@ import statistics
 from datetime import datetime, timezone
 
 from ..processing import alignment, units
+from .. import calibration as calchain
 from ..seatleak.gas import norm_temperature
 from . import liquid, plateaus as platmod
 
@@ -240,7 +241,8 @@ def _diagnose_suspects(points, curve, characteristic, rated_cv, r, thr):
     return suspects
 
 
-def run_flowcurve_analysis(db, fc_test_id, author="auto", new_adjustments=None):
+def run_flowcurve_analysis(db, fc_test_id, author="auto", new_adjustments=None,
+                           bindings_override=None):
     """执行单相液体流量曲线校核并保存新版本。"""
     test = db.get_flowcurve_test(fc_test_id)
     if test is None:
@@ -252,13 +254,18 @@ def run_flowcurve_analysis(db, fc_test_id, author="auto", new_adjustments=None):
     # ---- 累计调整（上一版本 + 本次新增） ----
     existing = db.list_flowcurve_analyses(fc_test_id)
     cumulative = []
+    prev_result = None
     if existing:
         prev = db.get_flowcurve_analysis(existing[-1]["id"])
         cumulative = list(prev["adjustments"])
+        prev_result = prev["result"]
     for mv in new_adjustments.get("plateau_moves", []):
         cumulative.append({"type": "plateau_move", "author": author, **mv})
     for d in new_adjustments.get("disabled_points", []):
         cumulative.append({"type": "disable_point", "author": author, **d})
+    if new_adjustments.get("calibration_bindings") is not None:
+        cumulative.append(calchain.rebind_adjustment(
+            author, new_adjustments["calibration_bindings"]))
 
     channel_exclusions = [a for a in cumulative if a["type"] == "exclusion"]
     manual_moves = [a for a in cumulative if a["type"] == "plateau_move"]
@@ -284,44 +291,61 @@ def run_flowcurve_analysis(db, fc_test_id, author="auto", new_adjustments=None):
     filtered, exclusion_records = _apply_exclusions(
         payload["series"], channel_exclusions)
 
+    # ---- 逐通道仪器校准链（先修正，再单位统一；flow 按液体流量计处理） ----
+    bindings = calchain.resolve_bindings(payload, prev_result, bindings_override)
+    corrected, chain_block = calchain.apply_chain(
+        db, test_kind="flowcurve", series=filtered, bindings=bindings,
+        test_started_at=payload.get("test_started_at"),
+        submitted_at=test["submitted_at"],
+        range_min=payload["range"]["min"], range_max=payload["range"]["max"],
+        flow_measurement_type="flow_liquid")
+    series_for_units = corrected if corrected is not None else filtered
+    if chain_block["mode"] == "channel_chain":
+        for r in chain_block["rejections"]:
+            evidence_gaps.append({"code": r["code"], "detail": r["detail"],
+                                  "channel": r["channel"],
+                                  "raw_reading_interval": r["raw_reading_interval"]})
+
     # ---- 单位统一 ----
     rng = payload["range"]
     raw = {}
     vals, n, c = units.normalize_signal(
-        filtered["position"]["points"], filtered["position"]["unit"],
+        series_for_units["position"]["points"], series_for_units["position"]["unit"],
         rng["min"], rng["max"], rng["unit"], "position")
     notes += n
     evidence_gaps += [{"code": "unit_conflict", "detail": f"单位冲突：{x}"} for x in c]
-    raw["position"] = ([float(p[0]) for p in filtered["position"]["points"]], vals)
+    raw["position"] = ([float(p[0]) for p in series_for_units["position"]["points"]], vals)
     for ch in ("upstream_pressure", "downstream_pressure"):
-        vals, n, c = units.normalize_pressure(filtered[ch]["points"],
-                                              filtered[ch]["unit"], ch)
+        vals, n, c = units.normalize_pressure(series_for_units[ch]["points"],
+                                              series_for_units[ch]["unit"], ch)
         notes += n
         evidence_gaps += [{"code": "unit_conflict", "detail": f"单位冲突：{x}"} for x in c]
-        raw[ch] = ([float(p[0]) for p in filtered[ch]["points"]], vals)
-    tvals, n, c = norm_temperature(filtered["temperature"]["points"],
-                                   filtered["temperature"]["unit"], "temperature")
+        raw[ch] = ([float(p[0]) for p in series_for_units[ch]["points"]], vals)
+    tvals, n, c = norm_temperature(series_for_units["temperature"]["points"],
+                                   series_for_units["temperature"]["unit"], "temperature")
     notes += n
     evidence_gaps += [{"code": "unit_conflict", "detail": f"单位冲突：{x}"} for x in c]
-    raw["temperature"] = ([float(p[0]) for p in filtered["temperature"]["points"]], tvals)
-    fvals, n, c = liquid.norm_flow_liquid(filtered["flow"]["points"],
-                                          filtered["flow"]["unit"], "flow")
+    raw["temperature"] = ([float(p[0]) for p in series_for_units["temperature"]["points"]], tvals)
+    fvals, n, c = liquid.norm_flow_liquid(series_for_units["flow"]["points"],
+                                          series_for_units["flow"]["unit"], "flow")
     notes += n
     evidence_gaps += [{"code": "unit_conflict", "detail": f"单位冲突：{x}"} for x in c]
-    raw["flow"] = ([float(p[0]) for p in filtered["flow"]["points"]], fvals)
+    raw["flow"] = ([float(p[0]) for p in series_for_units["flow"]["points"]], fvals)
 
-    # ---- 校准有效期 ----
-    cal_until = _parse_time(payload.get("calibration_valid_until"))
-    test_time = (_parse_time(payload.get("test_started_at"))
-                 or _parse_time(test["submitted_at"]))
-    if cal_until is None:
-        evidence_gaps.append({"code": "calibration_missing",
-                              "detail": "未提供校准有效期，无法确认流量计/变送器校准状态"})
-    elif test_time and cal_until < test_time:
-        evidence_gaps.append({
-            "code": "calibration_expired",
-            "detail": f"校准已于 {payload['calibration_valid_until']} 失效，"
-                      "校核数据不得用于维修结论"})
+    # ---- 校准有效期（legacy 模式沿用单一字段；链模式已逐通道核验） ----
+    if chain_block["mode"] == "legacy":
+        cal_until = _parse_time(payload.get("calibration_valid_until"))
+        test_time = (_parse_time(payload.get("test_started_at"))
+                     or _parse_time(test["submitted_at"]))
+        if cal_until is None:
+            evidence_gaps.append({"code": "calibration_missing",
+                                  "detail": "未提供校准有效期，无法确认流量计/变送器校准状态"})
+        elif test_time and cal_until < test_time:
+            evidence_gaps.append({
+                "code": "calibration_expired",
+                "detail": f"校准已于 {payload['calibration_valid_until']} 失效，"
+                          "校核数据不得用于维修结论"})
+    chain_block["legacy_calibration_valid_until"] = payload.get("calibration_valid_until")
 
     unit_conflict = any(g["code"] == "unit_conflict" for g in evidence_gaps)
 
@@ -571,6 +595,7 @@ def run_flowcurve_analysis(db, fc_test_id, author="auto", new_adjustments=None):
     blocking_gap_codes = {"unit_conflict", "calibration_missing",
                           "calibration_expired", "channel_no_overlap",
                           "no_plateau", "insufficient_adopted_points"}
+    blocking_gap_codes |= calchain.BLOCKING_REJECT_CODES
     blocking = [g for g in evidence_gaps if g["code"] in blocking_gap_codes]
     if blocking or any(g["code"] == "property_missing" for g in evidence_gaps):
         verdict = "no_conclusion"
@@ -619,6 +644,7 @@ def run_flowcurve_analysis(db, fc_test_id, author="auto", new_adjustments=None):
         "unit_notes": notes,
         "verdict": verdict,
         "evidence_gaps": evidence_gaps,
+        "calibration_chain": chain_block,
         "plateaus": plateaus_out,
         "boundary_log": boundary_log,
         "points": points,

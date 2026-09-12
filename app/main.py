@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from . import analysis, pairing, report, schemas
+from . import analysis, calibration as calchain, pairing, report, schemas
 from .db import Database
 from .failsafe import failsafe_analysis, failsafe_report, trend as fs_trend
 from .flowcurve import compare as fc_compare, fc_analysis, fc_report
@@ -53,6 +53,47 @@ def create_app(db_path=DEFAULT_DB):
         v["tests"] = db.list_tests(valve_id)
         return v
 
+    # ---- 仪器校准版本（逐通道校准链；版本不可变） ----
+    @app.post("/calibration-versions", status_code=201)
+    def create_calibration_version(body: schemas.CalibrationVersionCreate,
+                                   db=Depends(get_db)):
+        data = body.model_dump()
+        problems = calchain.validate_version_create(data)
+        if body.supersedes_id is not None \
+                and db.get_calibration_version(body.supersedes_id) is None:
+            problems.append(f"supersedes_id={body.supersedes_id} 指向不存在的版本")
+        if problems:
+            raise HTTPException(422, "；".join(problems))
+        digest = calchain.certificate_digest(data)
+        vid = db.create_calibration_version(
+            instrument_serial=body.instrument_serial,
+            measurement_type=body.measurement_type,
+            unit=body.unit,
+            valid_from=body.valid_from,
+            valid_until=body.valid_until,
+            range_min=body.range_min,
+            range_max=body.range_max,
+            points=data["points"],
+            standard_uncertainty=body.standard_uncertainty,
+            certificate_summary=body.certificate_summary,
+            certificate_digest=digest,
+            supersedes_id=body.supersedes_id,
+            note=body.note)
+        return db.get_calibration_version(vid)
+
+    @app.get("/calibration-versions")
+    def list_calibration_versions(instrument_serial: str | None = None,
+                                  measurement_type: str | None = None,
+                                  db=Depends(get_db)):
+        return db.list_calibration_versions(instrument_serial, measurement_type)
+
+    @app.get("/calibration-versions/{version_id}")
+    def get_calibration_version(version_id: int, db=Depends(get_db)):
+        v = db.get_calibration_version(version_id)
+        if not v:
+            raise HTTPException(404, "校准版本不存在")
+        return v
+
     # ---- 测试提交 ----
     @app.post("/tests", status_code=201)
     def submit_test(body: schemas.TestSubmission, db=Depends(get_db)):
@@ -90,8 +131,10 @@ def create_app(db_path=DEFAULT_DB):
             raise HTTPException(404, "测试不存在")
         author = body.author if body else "auto"
         override = body.uncertainty.model_dump() if body and body.uncertainty else None
+        bindings = body.calibration_bindings if body else None
         return analysis.run_analysis(db, test_id, author=author,
-                                     uncertainty_override=override)
+                                     uncertainty_override=override,
+                                     bindings_override=bindings)
 
     @app.get("/tests/{test_id}/analyses")
     def list_analyses(test_id: int, db=Depends(get_db)):
@@ -109,16 +152,19 @@ def create_app(db_path=DEFAULT_DB):
         base = db.get_analysis(analysis_id)
         if not base:
             raise HTTPException(404, "分析不存在")
-        if not body.boundary_moves and not body.exclusions:
-            raise HTTPException(422, "调整请求为空：需包含 boundary_moves 或 exclusions")
+        if not body.boundary_moves and not body.exclusions \
+                and body.calibration_bindings is None:
+            raise HTTPException(422, "调整请求为空：需包含 boundary_moves、exclusions 或 calibration_bindings")
         override = body.uncertainty.model_dump() if body.uncertainty is not None else None
         return analysis.run_analysis(
             db, base["test_id"], author=body.author,
             new_adjustments={
                 "boundary_moves": [m.model_dump() for m in body.boundary_moves],
                 "exclusions": [e.model_dump() for e in body.exclusions],
+                "calibration_bindings": body.calibration_bindings,
             },
-            uncertainty_override=override)
+            uncertainty_override=override,
+            bindings_override=body.calibration_bindings)
 
     # ---- 检修前后配对 ----
     @app.post("/pairings", status_code=201)
@@ -196,7 +242,9 @@ def create_app(db_path=DEFAULT_DB):
         if db.get_failsafe_test(fs_test_id) is None:
             raise HTTPException(404, "故障安全测试不存在")
         author = body.author if body else "auto"
-        return failsafe_analysis.run_failsafe_analysis(db, fs_test_id, author=author)
+        bindings = body.calibration_bindings if body else None
+        return failsafe_analysis.run_failsafe_analysis(
+            db, fs_test_id, author=author, bindings_override=bindings)
 
     @app.get("/failsafe/tests/{fs_test_id}/analyses")
     def list_failsafe_analyses(fs_test_id: int, db=Depends(get_db)):
@@ -214,8 +262,9 @@ def create_app(db_path=DEFAULT_DB):
         base = db.get_failsafe_analysis(analysis_id)
         if not base:
             raise HTTPException(404, "故障安全分析不存在")
-        if body.trip_move is None and body.window_move is None:
-            raise HTTPException(422, "调整请求为空：需包含 trip_move 或 window_move")
+        if body.trip_move is None and body.window_move is None \
+                and body.calibration_bindings is None:
+            raise HTTPException(422, "调整请求为空：需包含 trip_move、window_move 或 calibration_bindings")
         new_adj = {}
         if body.trip_move is not None:
             new_adj["trip_move"] = body.trip_move.model_dump()
@@ -223,10 +272,12 @@ def create_app(db_path=DEFAULT_DB):
             if body.window_move.window_end_s <= 0:
                 raise HTTPException(422, "观察窗长度必须为正数（跳闸后秒）")
             new_adj["window_move"] = body.window_move.model_dump()
+        new_adj["calibration_bindings"] = body.calibration_bindings
         try:
             return failsafe_analysis.run_failsafe_analysis(
                 db, base["failsafe_test_id"], author=body.author,
-                new_adjustments=new_adj)
+                new_adjustments=new_adj,
+                bindings_override=body.calibration_bindings)
         except ValueError as e:
             raise HTTPException(422, str(e))
 
@@ -320,7 +371,9 @@ def create_app(db_path=DEFAULT_DB):
         if db.get_seatleak_test(sl_test_id) is None:
             raise HTTPException(404, "阀座密封试验不存在")
         author = body.author if body else "auto"
-        return seat_analysis.run_seat_analysis(db, sl_test_id, author=author)
+        bindings = body.calibration_bindings if body else None
+        return seat_analysis.run_seat_analysis(
+            db, sl_test_id, author=author, bindings_override=bindings)
 
     @app.get("/seatleak/tests/{sl_test_id}/analyses")
     def list_seatleak_analyses(sl_test_id: int, db=Depends(get_db)):
@@ -338,14 +391,17 @@ def create_app(db_path=DEFAULT_DB):
         base = db.get_seatleak_analysis(analysis_id)
         if not base:
             raise HTTPException(404, "阀座密封分析不存在")
-        if not body.segment_moves and not body.exclusions:
-            raise HTTPException(422, "调整请求为空：需包含 segment_moves 或 exclusions")
+        if not body.segment_moves and not body.exclusions \
+                and body.calibration_bindings is None:
+            raise HTTPException(422, "调整请求为空：需包含 segment_moves、exclusions 或 calibration_bindings")
         return seat_analysis.run_seat_analysis(
             db, base["seatleak_test_id"], author=body.author,
             new_adjustments={
                 "segment_moves": [m.model_dump() for m in body.segment_moves],
                 "exclusions": [e.model_dump() for e in body.exclusions],
-            })
+                "calibration_bindings": body.calibration_bindings,
+            },
+            bindings_override=body.calibration_bindings)
 
     @app.post("/seatleak/comparisons", status_code=201)
     def create_seatleak_comparison(body: schemas.SLCompareRequest, db=Depends(get_db)):
@@ -422,7 +478,9 @@ def create_app(db_path=DEFAULT_DB):
         if db.get_thrust_test(ts_test_id) is None:
             raise HTTPException(404, "阀杆推力测试不存在")
         author = body.author if body else "auto"
-        return thrust_analysis.run_thrust_analysis(db, ts_test_id, author=author)
+        bindings = body.calibration_bindings if body else None
+        return thrust_analysis.run_thrust_analysis(
+            db, ts_test_id, author=author, bindings_override=bindings)
 
     @app.get("/stemthrust/tests/{ts_test_id}/analyses")
     def list_thrust_analyses(ts_test_id: int, db=Depends(get_db)):
@@ -440,8 +498,9 @@ def create_app(db_path=DEFAULT_DB):
         base = db.get_thrust_analysis(analysis_id)
         if not base:
             raise HTTPException(404, "阀杆推力分析不存在")
-        if not body.segment_moves and not body.exclusions:
-            raise HTTPException(422, "调整请求为空：需包含 segment_moves 或 exclusions")
+        if not body.segment_moves and not body.exclusions \
+                and body.calibration_bindings is None:
+            raise HTTPException(422, "调整请求为空：需包含 segment_moves、exclusions 或 calibration_bindings")
         for m in body.segment_moves:
             if not m.reason.strip():
                 raise HTTPException(422, "人工移动相位边界必须填写理由")
@@ -453,7 +512,9 @@ def create_app(db_path=DEFAULT_DB):
             new_adjustments={
                 "segment_moves": [m.model_dump() for m in body.segment_moves],
                 "exclusions": [e.model_dump() for e in body.exclusions],
-            })
+                "calibration_bindings": body.calibration_bindings,
+            },
+            bindings_override=body.calibration_bindings)
 
     @app.post("/stemthrust/comparisons", status_code=201)
     def create_thrust_comparison(body: schemas.TSCompareRequest, db=Depends(get_db)):
@@ -531,7 +592,9 @@ def create_app(db_path=DEFAULT_DB):
         if db.get_flowcurve_test(fc_test_id) is None:
             raise HTTPException(404, "流量曲线校核测试不存在")
         author = body.author if body else "auto"
-        return fc_analysis.run_flowcurve_analysis(db, fc_test_id, author=author)
+        bindings = body.calibration_bindings if body else None
+        return fc_analysis.run_flowcurve_analysis(
+            db, fc_test_id, author=author, bindings_override=bindings)
 
     @app.get("/flowcurve/tests/{fc_test_id}/analyses")
     def list_flowcurve_analyses(fc_test_id: int, db=Depends(get_db)):
@@ -550,8 +613,9 @@ def create_app(db_path=DEFAULT_DB):
         base = db.get_flowcurve_analysis(analysis_id)
         if not base:
             raise HTTPException(404, "流量曲线分析不存在")
-        if not body.plateau_moves and not body.disabled_points:
-            raise HTTPException(422, "调整请求为空：需包含 plateau_moves 或 disabled_points")
+        if not body.plateau_moves and not body.disabled_points \
+                and body.calibration_bindings is None:
+            raise HTTPException(422, "调整请求为空：需包含 plateau_moves、disabled_points 或 calibration_bindings")
         for m in body.plateau_moves:
             if not m.reason.strip():
                 raise HTTPException(422, "人工移动平台边界必须填写理由")
@@ -563,7 +627,9 @@ def create_app(db_path=DEFAULT_DB):
             new_adjustments={
                 "plateau_moves": [m.model_dump() for m in body.plateau_moves],
                 "disabled_points": [d.model_dump() for d in body.disabled_points],
-            })
+                "calibration_bindings": body.calibration_bindings,
+            },
+            bindings_override=body.calibration_bindings)
 
     @app.post("/flowcurve/comparisons", status_code=201)
     def create_flowcurve_comparison(body: schemas.FCCompareRequest, db=Depends(get_db)):

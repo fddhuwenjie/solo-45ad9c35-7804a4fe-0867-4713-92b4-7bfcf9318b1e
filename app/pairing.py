@@ -5,6 +5,7 @@
 中心值差值但明确标为 not_evaluated，不得据中心值直接判定。
 """
 
+from . import calibration as calchain
 from . import uncertainty as unc
 
 # 参与比较的标量指标：(名称, 取值函数, 阈值键, 单位)
@@ -44,6 +45,11 @@ def check_compatibility(pre, post):
     for label, res in (("检修前", pre), ("检修后", post)):
         if res["verdict"] == "no_conclusion":
             reasons.append(f"{label}分析存在阻断问题（{'; '.join(res['blocking_issues'])}），"
+                           "不得用于维修结论")
+        chain = res.get("calibration_chain") or {}
+        if chain.get("mode") == "channel_chain" and not chain.get("accepted"):
+            reasons.append(f"{label}分析存在被拒绝的校准通道"
+                           f"（{', '.join(r['channel'] + ':' + r['code'] for r in chain.get('rejections', []))}），"
                            "不得用于维修结论")
     pre_dir, post_dir = _directions(pre), _directions(post)
     for d, name in (("opening", "开阀"), ("closing", "关阀")):
@@ -95,6 +101,7 @@ def compare(db, pre_analysis_id, post_analysis_id):
         "improvements": [],
         "still_exceeding": [],
         "uncertainty_comparison": [],
+        "calibration_comparison": calchain.compare_chains(pre, post),
     }
     if not compatible:
         return result

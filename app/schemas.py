@@ -2,7 +2,66 @@
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+# ===================== 逐通道仪器校准链 =====================
+
+MeasurementType = Literal[
+    "command", "position", "pressure", "temperature",
+    "flow_gas", "flow_liquid"]
+
+
+class CalibrationVersionCreate(BaseModel):
+    """校准（证书）版本：一经创建不可变；续证/纠错只能派生新版本。"""
+    instrument_serial: str = Field(..., min_length=1, description="仪器序列号")
+    measurement_type: MeasurementType = Field(
+        ..., description="测量类型：command/position/pressure/temperature/flow_gas/flow_liquid")
+    unit: str = Field(..., description="证书单位，须与测量类型单位族兼容（同族可不同单位）")
+    valid_from: str = Field(..., description="证书生效时间 ISO 8601（纯日期按当日 UTC 00:00）")
+    valid_until: str = Field(..., description="证书失效时间 ISO 8601")
+    range_min: float = Field(..., description="证书量程下限（证书单位）")
+    range_max: float = Field(..., description="证书量程上限（证书单位）")
+    points: list[list[float]] = Field(
+        ..., min_length=2,
+        description="示值—参考值点列 [[indication, reference], ...]，"
+                    "示值与参考值均须严格单调递增")
+    standard_uncertainty: float = Field(
+        ..., gt=0, description="校准标准不确定度（1σ，证书单位）")
+    certificate_summary: str = Field("", description="证书摘要/编号/签发机构等")
+    supersedes_id: Optional[int] = Field(
+        None, description="续证所替代的旧版本 id（旧版本不可改写，仅记录派生关系）")
+    note: str = ""
+
+    @field_validator("instrument_serial")
+    @classmethod
+    def _strip_serial(cls, v):
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("instrument_serial 不能为空")
+        return v
+
+    @field_validator("points")
+    @classmethod
+    def _check_points(cls, pts):
+        for p in pts:
+            if len(p) != 2:
+                raise ValueError("每个校准点须为 [示值, 参考值] 二元组")
+        ind = [float(p[0]) for p in pts]
+        ref = [float(p[1]) for p in pts]
+        if any(ind[i] <= ind[i - 1] for i in range(1, len(ind))):
+            raise ValueError("示值列必须严格单调递增（点列不单调不允许建版）")
+        if any(ref[i] <= ref[i - 1] for i in range(1, len(ref))):
+            raise ValueError("参考值列必须严格单调递增（点列不单调不允许建版）")
+        return pts
+
+    @field_validator("range_max")
+    @classmethod
+    def _check_range(cls, v, info):
+        lo = info.data.get("range_min")
+        if lo is not None and v <= lo:
+            raise ValueError("量程上限必须大于下限")
+        return v
 
 
 class SeriesData(BaseModel):
@@ -112,7 +171,12 @@ class TestSubmission(BaseModel):
     conditions: Conditions
     thresholds: Thresholds = Thresholds()
     calibration_valid_until: Optional[str] = Field(
-        None, description="校准有效期 ISO 日期，过期则测试不得用于维修结论")
+        None, description="校准有效期 ISO 日期（legacy 模式），过期则测试不得用于维修结论；"
+                          "提供 calibration_bindings 后以逐通道链为准")
+    calibration_bindings: Optional[dict[str, int]] = Field(
+        None, description="逐通道校准版本绑定 {通道: 校准版本id}；提供后进入逐通道链模式，"
+                          "全部测量通道都必须绑定有效版本。旧字段 calibration_valid_until 仅在"
+                          "未提供绑定时生效")
     uncertainty: Optional[UncertaintyInput] = Field(
         None, description="测量不确定度评估输入（各通道分辨率/准确度/零点漂移/时钟抖动/校准）；"
                           "未提供时分析沿用中心值结果，指标明确标为未评估")
@@ -123,6 +187,10 @@ class AnalyzeRequest(BaseModel):
     uncertainty: Optional[UncertaintyInput] = Field(
         None, description="本次分析使用的测量不确定度评估输入；缺省时沿用测试提交中的声明，"
                           "均未提供则指标只给中心值并标为未评估")
+    calibration_bindings: Optional[dict[str, int]] = Field(
+        None, description="本次分析冻结的逐通道校准绑定 {通道: 校准版本id}；"
+                          "缺省沿用上一版本/测试提交；提供空对象 {} 可显式回到 legacy 模式。"
+                          "改绑不改变测试数据，但派生新分析版本")
 
 
 class BoundaryMove(BaseModel):
@@ -145,6 +213,8 @@ class AdjustRequest(BaseModel):
     exclusions: list[Exclusion] = []
     uncertainty: Optional[UncertaintyInput] = Field(
         None, description="可选：覆盖不确定度评估输入；缺省沿用上一版本的输入")
+    calibration_bindings: Optional[dict[str, int]] = Field(
+        None, description="可选：改绑逐通道校准版本（派生新版本；旧分析不变）；空对象 {} 回到 legacy")
     note: str = ""
 
 
@@ -204,6 +274,10 @@ class FSTestSubmission(BaseModel):
     thresholds: FSThresholds = FSThresholds()
     observation_window_s: float = Field(20.0, gt=0, description="首次有效跳闸后默认观察窗长度")
     calibration_valid_until: Optional[str] = None
+    calibration_bindings: Optional[dict[str, int]] = Field(
+        None, description="逐通道校准版本绑定 {通道: 校准版本id}；提供后进入逐通道链模式，"
+                          "本测试的全部测量通道都必须绑定有效版本。旧字段 calibration_valid_until "
+                          "在未提供绑定时继续生效")
 
 
 class FSTripMove(BaseModel):
@@ -220,6 +294,8 @@ class FSAdjustRequest(BaseModel):
     author: str
     trip_move: Optional[FSTripMove] = None
     window_move: Optional[FSWindowMove] = None
+    calibration_bindings: Optional[dict[str, int]] = Field(
+        None, description="可选：改绑逐通道校准版本（派生新版本；旧分析不变）；空对象 {} 回到 legacy")
     note: str = ""
 
 
@@ -317,6 +393,10 @@ class SLTestSubmission(BaseModel):
     conditions: SLConditions = SLConditions()
     thresholds: SLThresholds = SLThresholds()
     calibration_valid_until: Optional[str] = None
+    calibration_bindings: Optional[dict[str, int]] = Field(
+        None, description="逐通道校准版本绑定 {通道: 校准版本id}；提供后进入逐通道链模式，"
+                          "本测试的全部测量通道都必须绑定有效版本。旧字段 calibration_valid_until "
+                          "在未提供绑定时继续生效")
 
 
 class SLSegmentMove(BaseModel):
@@ -338,6 +418,8 @@ class SLAdjustRequest(BaseModel):
     author: str
     segment_moves: list[SLSegmentMove] = []
     exclusions: list[SLExclusion] = []
+    calibration_bindings: Optional[dict[str, int]] = Field(
+        None, description="可选：改绑逐通道校准版本（派生新版本；旧分析不变）；空对象 {} 回到 legacy")
     note: str = ""
 
 
@@ -424,6 +506,10 @@ class TSTestSubmission(BaseModel):
     conditions: TSConditions = TSConditions()
     thresholds: TSThresholds = TSThresholds()
     calibration_valid_until: Optional[str] = None
+    calibration_bindings: Optional[dict[str, int]] = Field(
+        None, description="逐通道校准版本绑定 {通道: 校准版本id}；提供后进入逐通道链模式，"
+                          "本测试的全部测量通道都必须绑定有效版本。旧字段 calibration_valid_until "
+                          "在未提供绑定时继续生效")
 
 
 class TSSegmentMove(BaseModel):
@@ -446,6 +532,8 @@ class TSAdjustRequest(BaseModel):
     author: str
     segment_moves: list[TSSegmentMove] = []
     exclusions: list[TSExclusion] = []
+    calibration_bindings: Optional[dict[str, int]] = Field(
+        None, description="可选：改绑逐通道校准版本（派生新版本；旧分析不变）；空对象 {} 回到 legacy")
     note: str = ""
 
 
@@ -538,6 +626,10 @@ class FCTestSubmission(BaseModel):
     conditions: FCConditions = FCConditions()
     thresholds: FCThresholds = FCThresholds()
     calibration_valid_until: Optional[str] = None
+    calibration_bindings: Optional[dict[str, int]] = Field(
+        None, description="逐通道校准版本绑定 {通道: 校准版本id}；提供后进入逐通道链模式，"
+                          "本测试的全部测量通道都必须绑定有效版本。旧字段 calibration_valid_until "
+                          "在未提供绑定时继续生效")
 
 
 class FCMovePlateau(BaseModel):
@@ -556,6 +648,8 @@ class FCAdjustRequest(BaseModel):
     author: str
     plateau_moves: list[FCMovePlateau] = []
     disabled_points: list[FCDisablePoint] = []
+    calibration_bindings: Optional[dict[str, int]] = Field(
+        None, description="可选：改绑逐通道校准版本（派生新版本；旧分析不变）；空对象 {} 回到 legacy")
     note: str = ""
 
 

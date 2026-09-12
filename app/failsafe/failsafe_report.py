@@ -5,6 +5,9 @@
 """
 
 import html
+import json
+
+from ..calibration_report import render_calibration_section
 
 VERDICT_NAMES = {"pass": "通过", "fail": "未达安全要求", "no_conclusion": "证据不足，不得判定"}
 MODE_NAMES = {"fail_open": "失气打开 (fail-open)", "fail_close": "失气关闭 (fail-close)",
@@ -204,12 +207,20 @@ def render_fs_report(analysis, test, valve):
         + (f"（时段：{', '.join(f'{a}–{b}s' for a, b in i.get('periods', []))}）"
            if i.get("periods") else "") + "</li>"
         for i in r.get("issues", [])) or "<li>无</li>"
-    adjustments = "".join(
-        f"<li>v{analysis['version']} / {esc(a.get('author', ''))}："
-        + (f"人工跳闸点 → {a['new_trip_time']}s" if a["type"] == "trip_move"
-           else f"观察窗缩短/延长至跳闸后 {a['window_end_s']}s")
-        + f"（{esc(a.get('reason', ''))}）</li>"
-        for a in analysis["adjustments"]) or "<li>无（自动分析）</li>"
+    def _adj_line(a):
+        if a["type"] == "trip_move":
+            return (f"<li>v{analysis['version']} / {esc(a.get('author', ''))}："
+                    f"人工跳闸点 → {a['new_trip_time']}s（{esc(a.get('reason', ''))}）</li>")
+        if a["type"] == "calibration_rebind":
+            return (f"<li>v{analysis['version']} / {esc(a.get('author', ''))}："
+                    f"改绑逐通道校准版本 {esc(json.dumps(a.get('bindings', {}), ensure_ascii=False))}"
+                    "（派生新版本，旧分析冻结版本不变）</li>")
+        return (f"<li>v{analysis['version']} / {esc(a.get('author', ''))}："
+                f"观察窗缩短/延长至跳闸后 {a['window_end_s']}s"
+                f"（{esc(a.get('reason', ''))}）</li>")
+
+    adjustments = "".join(_adj_line(a) for a in analysis["adjustments"]) \
+        or "<li>无（自动分析）</li>"
     adopted = "".join(
         f"<li><b>{esc(a['name'])}</b>：{a['interval_s'][0]}–{a['interval_s'][1]}s"
         f"（{esc(a.get('method', ''))}）</li>"
@@ -270,6 +281,8 @@ def render_fs_report(analysis, test, valve):
 
 <h2>超限与动作异常</h2>
 <ul>{issues}</ul>
+
+{render_calibration_section(r)}
 
 <h2>证据缺口（存在时不得给出通过结论）</h2>
 <ul>{gaps}</ul>

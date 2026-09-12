@@ -16,6 +16,7 @@ import json
 from datetime import datetime, timezone
 
 from ..processing import alignment, detection, units
+from .. import calibration as calchain
 from . import events, motion
 
 
@@ -116,7 +117,8 @@ def _dropouts_in_window(raw_series, trip_time, window_end, coverage_min=0.8,
     return events_out, platform_events, gap
 
 
-def run_failsafe_analysis(db, fs_test_id, author="auto", new_adjustments=None):
+def run_failsafe_analysis(db, fs_test_id, author="auto", new_adjustments=None,
+                          bindings_override=None):
     test = db.get_failsafe_test(fs_test_id)
     if test is None:
         raise KeyError(f"故障安全测试 {fs_test_id} 不存在")
@@ -127,15 +129,20 @@ def run_failsafe_analysis(db, fs_test_id, author="auto", new_adjustments=None):
     # ---- 累计调整（上一版本 + 本次新增） ----
     existing = db.list_failsafe_analyses(fs_test_id)
     cumulative = []
+    prev_result = None
     if existing:
         prev = db.get_failsafe_analysis(existing[-1]["id"])
         cumulative = list(prev["adjustments"])
+        prev_result = prev["result"]
     if new_adjustments.get("trip_move"):
         cumulative.append({"type": "trip_move", "author": author,
                            **new_adjustments["trip_move"]})
     if new_adjustments.get("window_move"):
         cumulative.append({"type": "window_move", "author": author,
                            **new_adjustments["window_move"]})
+    if new_adjustments.get("calibration_bindings") is not None:
+        cumulative.append(calchain.rebind_adjustment(
+            author, new_adjustments["calibration_bindings"]))
     manual_trip = next((a for a in reversed(cumulative) if a["type"] == "trip_move"), None)
     manual_window = next((a for a in reversed(cumulative) if a["type"] == "window_move"), None)
 
@@ -143,8 +150,24 @@ def run_failsafe_analysis(db, fs_test_id, author="auto", new_adjustments=None):
     notes = []
     rng = payload["range"]
 
-    # ---- 单位统一：指令/阀位/压力 ----
-    norm = units.normalize_series(payload["series"], rng["min"], rng["max"], rng["unit"])
+    # ---- 逐通道仪器校准链（先修正，再单位统一） ----
+    bindings = calchain.resolve_bindings(payload, prev_result, bindings_override)
+    series_for_units = payload["series"]
+    corrected, chain_block = calchain.apply_chain(
+        db, test_kind="failsafe", series=payload["series"], bindings=bindings,
+        test_started_at=payload.get("test_started_at"),
+        submitted_at=test["submitted_at"],
+        range_min=rng["min"], range_max=rng["max"])
+    if corrected is not None:
+        series_for_units = {**payload["series"], **corrected}
+    if chain_block["mode"] == "channel_chain":
+        for r in chain_block["rejections"]:
+            evidence_gaps.append({"code": r["code"], "detail": r["detail"],
+                                  "channel": r["channel"],
+                                  "raw_reading_interval": r["raw_reading_interval"]})
+
+    # ---- 单位统一：指令/阀位/压力（trip 接点不参与校准） ----
+    norm = units.normalize_series(series_for_units, rng["min"], rng["max"], rng["unit"])
     raw = {c: norm[c] for c in ("command", "position", "pressure")}
     notes += norm["notes"]
     for c in norm["conflicts"]:
@@ -158,17 +181,19 @@ def run_failsafe_analysis(db, fs_test_id, author="auto", new_adjustments=None):
     for c in tconf:
         evidence_gaps.append({"code": "unit_conflict", "detail": f"单位冲突：{c}"})
 
-    # ---- 校准有效期 ----
-    cal_until = _parse_time(payload.get("calibration_valid_until"))
-    test_time = _parse_time(payload.get("test_started_at")) or _parse_time(test["submitted_at"])
-    if cal_until is None:
-        evidence_gaps.append({"code": "calibration_missing",
-                              "detail": "未提供校准有效期，无法确认仪表校准状态"})
-    elif test_time and cal_until < test_time:
-        evidence_gaps.append({
-            "code": "calibration_expired",
-            "detail": f"校准已于 {payload['calibration_valid_until']} 失效，测试时间 "
-                      f"{payload.get('test_started_at') or test['submitted_at']} 晚于有效期"})
+    # ---- 校准有效期（legacy 模式沿用单一字段；链模式已逐通道核验） ----
+    if chain_block["mode"] == "legacy":
+        cal_until = _parse_time(payload.get("calibration_valid_until"))
+        test_time = _parse_time(payload.get("test_started_at")) or _parse_time(test["submitted_at"])
+        if cal_until is None:
+            evidence_gaps.append({"code": "calibration_missing",
+                                  "detail": "未提供校准有效期，无法确认仪表校准状态"})
+        elif test_time and cal_until < test_time:
+            evidence_gaps.append({
+                "code": "calibration_expired",
+                "detail": f"校准已于 {payload['calibration_valid_until']} 失效，测试时间 "
+                          f"{payload.get('test_started_at') or test['submitted_at']} 晚于有效期"})
+    chain_block["legacy_calibration_valid_until"] = payload.get("calibration_valid_until")
 
     # ---- 跳闸定位 ----
     trip_info = events.locate_trip(tts, bits, trip_pts,
@@ -336,6 +361,7 @@ def run_failsafe_analysis(db, fs_test_id, author="auto", new_adjustments=None):
         **result_base,
         "verdict": verdict,
         "evidence_gaps": evidence_gaps,
+        "calibration_chain": chain_block,
         "trip": {
             "trip_time_s": round(trip_time, 3) if trip_time is not None else None,
             "source": trip_source,

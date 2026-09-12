@@ -8,7 +8,9 @@
 """
 
 import html
+import json
 
+from ..calibration_report import render_calibration_section
 from .liquid import FLOW_TO_M3H, characteristic_curve
 
 VERDICT_NAMES = {
@@ -346,6 +348,10 @@ def render_fc_report(analysis, test, valve):
         if a["type"] == "plateau_move":
             return (f"移动平台 #{a['plateau_index']} {a['boundary']} 边界 → "
                     f"{a['new_time']}s（{esc(a.get('reason', ''))}）")
+        if a["type"] == "calibration_rebind":
+            return ("改绑逐通道校准版本 "
+                    + json.dumps(a.get("bindings", {}), ensure_ascii=False)
+                    + "（派生新版本，旧分析冻结版本不变）")
         return f"停用平台测点 #{a['plateau_index']}（{esc(a.get('reason', ''))}）"
 
     adjustments = "".join(
@@ -432,6 +438,8 @@ Ff = 0.96 − 0.28·√(Pv/Pc)，压力均按表压加大气压 {r.get('atmosphe
 
 <h2>嫌疑诊断（堵塞 / 冲蚀 / 反装行程）</h2>
 <ul>{suspects}</ul>
+
+{render_calibration_section(r)}
 
 <h2>证据缺口（存在时不得给出结论）</h2>
 <ul>{gaps}</ul>

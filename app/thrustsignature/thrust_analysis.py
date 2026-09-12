@@ -20,6 +20,7 @@ import statistics
 from datetime import datetime, timezone
 
 from ..processing import alignment, detection, units
+from .. import calibration as calchain
 from . import mechanics, phases as phmod
 
 PHASE_NAMES = {"breakaway": "启程", "unseat": "离座", "running": "匀速",
@@ -115,7 +116,8 @@ def _check(checks, metric, value, thr_max=None, thr_min=None, basis=""):
     checks.append(chk)
 
 
-def run_thrust_analysis(db, ts_test_id, author="auto", new_adjustments=None):
+def run_thrust_analysis(db, ts_test_id, author="auto", new_adjustments=None,
+                        bindings_override=None):
     """执行阀杆推力签名分析并保存新版本。"""
     test = db.get_thrust_test(ts_test_id)
     if test is None:
@@ -128,13 +130,18 @@ def run_thrust_analysis(db, ts_test_id, author="auto", new_adjustments=None):
     # ---- 累计调整 ----
     existing = db.list_thrust_analyses(ts_test_id)
     cumulative = []
+    prev_result = None
     if existing:
         prev = db.get_thrust_analysis(existing[-1]["id"])
         cumulative = list(prev["adjustments"])
+        prev_result = prev["result"]
     for mv in new_adjustments.get("segment_moves", []):
         cumulative.append({"type": "segment_move", "author": author, **mv})
     for ex in new_adjustments.get("exclusions", []):
         cumulative.append({"type": "exclusion", "author": author, **ex})
+    if new_adjustments.get("calibration_bindings") is not None:
+        cumulative.append(calchain.rebind_adjustment(
+            author, new_adjustments["calibration_bindings"]))
     exclusions = [a for a in cumulative if a["type"] == "exclusion"]
     manual_moves = [a for a in cumulative if a["type"] == "segment_move"]
 
@@ -143,6 +150,20 @@ def run_thrust_analysis(db, ts_test_id, author="auto", new_adjustments=None):
     all_channels = ("command", "position", "supply_pressure",
                     "chamber_a_pressure", "chamber_b_pressure")
     filtered, exclusion_records = _apply_exclusions(series_in, all_channels, exclusions)
+
+    # ---- 逐通道仪器校准链（先修正，再单位统一） ----
+    bindings = calchain.resolve_bindings(payload, prev_result, bindings_override)
+    corrected, chain_block = calchain.apply_chain(
+        db, test_kind="thrust", series=filtered, bindings=bindings,
+        test_started_at=payload.get("test_started_at"),
+        submitted_at=test["submitted_at"],
+        range_min=payload["range"]["min"], range_max=payload["range"]["max"])
+    series_for_units = corrected if corrected is not None else filtered
+    if chain_block["mode"] == "channel_chain":
+        for r in chain_block["rejections"]:
+            evidence_gaps.append({"code": r["code"], "detail": r["detail"],
+                                  "channel": r["channel"],
+                                  "raw_reading_interval": r["raw_reading_interval"]})
 
     # ---- 执行机构配置（面积量纲） ----
     cfg, unit_block = None, False
@@ -180,33 +201,35 @@ def run_thrust_analysis(db, ts_test_id, author="auto", new_adjustments=None):
         if not present[ch]:
             continue
         vals, n, c = units.normalize_signal(
-            filtered[ch]["points"], filtered[ch]["unit"],
+            series_for_units[ch]["points"], series_for_units[ch]["unit"],
             rng["min"], rng["max"], rng["unit"], ch)
         notes += n
         evidence_gaps += [{"code": "unit_conflict", "detail": f"单位冲突：{x}"} for x in c]
-        raw[ch] = ([float(p[0]) for p in filtered[ch]["points"]], vals)
+        raw[ch] = ([float(p[0]) for p in series_for_units[ch]["points"]], vals)
     for ch in ("supply_pressure", "chamber_a_pressure", "chamber_b_pressure"):
         if not present[ch]:
             continue
-        vals, n, c = units.normalize_pressure(filtered[ch]["points"],
-                                              filtered[ch]["unit"], ch)
+        vals, n, c = units.normalize_pressure(series_for_units[ch]["points"],
+                                              series_for_units[ch]["unit"], ch)
         notes += n
         evidence_gaps += [{"code": "unit_conflict", "detail": f"单位冲突：{x}"} for x in c]
-        raw[ch] = ([float(p[0]) for p in filtered[ch]["points"]], vals)
+        raw[ch] = ([float(p[0]) for p in series_for_units[ch]["points"]], vals)
     if any(g["code"] == "unit_conflict" for g in evidence_gaps):
         unit_block = True
 
-    # ---- 校准有效期 ----
-    cal_until = _parse_time(payload.get("calibration_valid_until"))
-    test_time = _parse_time(payload.get("test_started_at")) or _parse_time(test["submitted_at"])
-    if cal_until is None:
-        evidence_gaps.append({"code": "calibration_missing",
-                              "detail": "未提供校准有效期，压力/阀位仪表校准状态未知"})
-    elif test_time and cal_until < test_time:
-        evidence_gaps.append({
-            "code": "calibration_expired",
-            "detail": f"校准已于 {payload['calibration_valid_until']} 失效，测试时间 "
-                      f"{payload.get('test_started_at') or test['submitted_at']} 晚于有效期"})
+    # ---- 校准有效期（legacy 模式沿用单一字段；链模式已逐通道核验） ----
+    if chain_block["mode"] == "legacy":
+        cal_until = _parse_time(payload.get("calibration_valid_until"))
+        test_time = _parse_time(payload.get("test_started_at")) or _parse_time(test["submitted_at"])
+        if cal_until is None:
+            evidence_gaps.append({"code": "calibration_missing",
+                                  "detail": "未提供校准有效期，压力/阀位仪表校准状态未知"})
+        elif test_time and cal_until < test_time:
+            evidence_gaps.append({
+                "code": "calibration_expired",
+                "detail": f"校准已于 {payload['calibration_valid_until']} 失效，测试时间 "
+                          f"{payload.get('test_started_at') or test['submitted_at']} 晚于有效期"})
+    chain_block["legacy_calibration_valid_until"] = payload.get("calibration_valid_until")
 
     metrics, checks, issues, adopted = {}, [], [], []
     runs_out, phases_out, boundary_log = [], [], []
@@ -532,6 +555,7 @@ def run_thrust_analysis(db, ts_test_id, author="auto", new_adjustments=None):
         "unit_notes": notes,
         "verdict": verdict,
         "evidence_gaps": evidence_gaps,
+        "calibration_chain": chain_block,
         "runs": runs_out,
         "phases": [
             {k: v for k, v in ph.items() if not k.startswith("i_")}

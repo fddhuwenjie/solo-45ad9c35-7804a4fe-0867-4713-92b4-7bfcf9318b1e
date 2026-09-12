@@ -6,6 +6,25 @@ import threading
 from datetime import datetime, timezone
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS calibration_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  instrument_serial TEXT NOT NULL,
+  measurement_type TEXT NOT NULL,
+  unit TEXT NOT NULL,
+  valid_from TEXT NOT NULL,
+  valid_until TEXT NOT NULL,
+  range_min REAL NOT NULL,
+  range_max REAL NOT NULL,
+  points_json TEXT NOT NULL,
+  standard_uncertainty REAL NOT NULL,
+  certificate_summary TEXT NOT NULL DEFAULT '',
+  certificate_digest TEXT NOT NULL,
+  supersedes_id INTEGER,
+  note TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_calibration_lookup
+  ON calibration_versions(instrument_serial, measurement_type);
 CREATE TABLE IF NOT EXISTS valves (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   tag TEXT UNIQUE NOT NULL,
@@ -179,6 +198,50 @@ class Database:
 
     def close(self):
         self._conn.close()
+
+    # ---- 仪器校准版本（不可变；续证/纠错派生新版本） ----
+    def create_calibration_version(self, instrument_serial, measurement_type, unit,
+                                   valid_from, valid_until, range_min, range_max,
+                                   points, standard_uncertainty, certificate_summary,
+                                   certificate_digest, supersedes_id, note):
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """INSERT INTO calibration_versions(instrument_serial, measurement_type,
+                   unit, valid_from, valid_until, range_min, range_max, points_json,
+                   standard_uncertainty, certificate_summary, certificate_digest,
+                   supersedes_id, note, created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (instrument_serial, measurement_type, unit, valid_from, valid_until,
+                 range_min, range_max, json.dumps(points), standard_uncertainty,
+                 certificate_summary, certificate_digest, supersedes_id, note, _now()))
+            return cur.lastrowid
+
+    def get_calibration_version(self, version_id):
+        row = self._conn.execute(
+            "SELECT * FROM calibration_versions WHERE id=?", (version_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["points"] = json.loads(d.pop("points_json"))
+        return d
+
+    def list_calibration_versions(self, instrument_serial=None, measurement_type=None):
+        q = "SELECT * FROM calibration_versions WHERE 1=1"
+        args = []
+        if instrument_serial:
+            q += " AND instrument_serial=?"
+            args.append(instrument_serial)
+        if measurement_type:
+            q += " AND measurement_type=?"
+            args.append(measurement_type)
+        q += " ORDER BY id"
+        rows = self._conn.execute(q, args).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["points"] = json.loads(d.pop("points_json"))
+            out.append(d)
+        return out
 
     # ---- 阀门档案 ----
     def create_valve(self, tag, description=""):
