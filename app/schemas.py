@@ -40,6 +40,67 @@ class Conditions(BaseModel):
     note: str = ""
 
 
+UncertaintyDistribution = Literal["rectangular", "normal"]
+
+# 允许声明的分量单位（按通道归一化后的量纲校验）：
+# 指令/阀位：%、mA、mm/cm/in/inch；压力：kPa/MPa/bar/psi/kgf/cm2；时间：s
+UNCERTAINTY_COMPONENT_UNITS = (
+    "%", "mA", "mm", "cm", "in", "inch",
+    "kPa", "MPa", "bar", "psi", "kgf/cm2", "s",
+)
+
+
+class UncertaintyComponent(BaseModel):
+    """一个不确定度输入分量。
+
+    - resolution 分辨率：按均匀分布，半宽 = 声明值 / 2（量化步进）；
+    - accuracy 准确度：默认均匀分布（声明值为允许误差限/半宽）；
+    - zero_drift 零点漂移：默认均匀分布（声明值为漂移限/半宽）；
+    - calibration 校准标准不确定度：默认正态分布（声明值即 1σ 标准不确定度）。
+    value 的单位由 unit 声明，必须与通道量纲兼容（时间抖动为 s）。
+    """
+    kind: Literal["resolution", "accuracy", "zero_drift", "calibration"]
+    value: float = Field(..., ge=0)
+    unit: str = Field(..., description="分量单位，须与通道量纲一致；时间抖动为 s")
+    distribution: Optional[UncertaintyDistribution] = Field(
+        None, description="缺省：resolution/accuracy/zero_drift=rectangular，calibration=normal")
+
+
+class ChannelUncertainty(BaseModel):
+    """单通道测量不确定度分量（均可选，未提供的分量不计入评估）。"""
+    resolution: Optional[UncertaintyComponent] = None
+    accuracy: Optional[UncertaintyComponent] = None
+    zero_drift: Optional[UncertaintyComponent] = None
+    time_jitter_s: float = Field(
+        0.0, ge=0, description="采样时刻抖动（标准差，秒）：通道时钟偏差，按正态分布扰动时标")
+    calibration: Optional[UncertaintyComponent] = Field(
+        None, description="本通道校准标准不确定度；也可在 calibration 块统一声明")
+
+
+class CalibrationUncertainty(BaseModel):
+    """校准标准不确定度及其覆盖范围；范围不覆盖观测值时评估无效。"""
+    value: float = Field(..., gt=0, description="校准标准不确定度（1σ），单位由 unit 声明")
+    unit: str = Field(..., description="与应用通道量纲一致（%/mA/行程 或压力单位）")
+    distribution: UncertaintyDistribution = "normal"
+    applies_to: list[Literal["command", "position", "pressure"]] = Field(
+        ["command", "position", "pressure"], description="该校准分量应用的通道")
+    range_min: Optional[float] = Field(None, description="校准覆盖范围下限（unit/range_unit 单位）")
+    range_max: Optional[float] = Field(None, description="校准覆盖范围上限")
+    range_unit: Optional[str] = Field(None, description="覆盖范围单位，默认与 unit 相同")
+
+
+class UncertaintyInput(BaseModel):
+    """测量不确定度评估输入（蒙特卡洛）。"""
+    channels: dict[Literal["command", "position", "pressure"], ChannelUncertainty] = Field(
+        default_factory=dict)
+    calibration: Optional[CalibrationUncertainty] = None
+    n_samples: int = Field(120, ge=20, le=2000, description="蒙特卡洛重采样次数")
+    seed: int = Field(20260912, description="固定随机种子（同一输入须可复现）")
+    interval_prob: float = Field(
+        0.95, gt=0, lt=1, description="输出区间的经验概率（分位数法）")
+    note: str = ""
+
+
 class TestSubmission(BaseModel):
     valve_tag: str
     valve_description: str = ""
@@ -51,10 +112,16 @@ class TestSubmission(BaseModel):
     thresholds: Thresholds = Thresholds()
     calibration_valid_until: Optional[str] = Field(
         None, description="校准有效期 ISO 日期，过期则测试不得用于维修结论")
+    uncertainty: Optional[UncertaintyInput] = Field(
+        None, description="测量不确定度评估输入（各通道分辨率/准确度/零点漂移/时钟抖动/校准）；"
+                          "未提供时分析沿用中心值结果，指标明确标为未评估")
 
 
 class AnalyzeRequest(BaseModel):
     author: str = "auto"
+    uncertainty: Optional[UncertaintyInput] = Field(
+        None, description="本次分析使用的测量不确定度评估输入；缺省时沿用测试提交中的声明，"
+                          "均未提供则指标只给中心值并标为未评估")
 
 
 class BoundaryMove(BaseModel):
@@ -75,6 +142,8 @@ class AdjustRequest(BaseModel):
     author: str
     boundary_moves: list[BoundaryMove] = []
     exclusions: list[Exclusion] = []
+    uncertainty: Optional[UncertaintyInput] = Field(
+        None, description="可选：覆盖不确定度评估输入；缺省沿用上一版本的输入")
     note: str = ""
 
 

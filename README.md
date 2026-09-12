@@ -33,6 +33,20 @@ uvicorn app.main:app --port 8000
    反馈信号）、未完成行程。
 6. **判定**：存在阻断问题 → `no_conclusion`；有超限/异常 → `exceedances`；
    否则 `ok`。
+7. **测量不确定度评估（蒙特卡洛）**：测试提交或 `/analyze` 请求可携带
+   `uncertainty` 输入，声明各通道分辨率（均匀量化）、准确度、零点漂移、
+   采样时间抖动（通道时钟偏差）与校准标准不确定度（正态，含覆盖范围）。
+   按固定种子对单位统一后的原始点做误差扰动并重新对齐/重采样，复算
+   行程时间、死区、回差、过冲、稳态偏差的经验区间（默认 95%，分位数法），
+   结果记录样本数、种子、输入分量与同一组复算参数。指标 95% 区间**跨越
+   判定阈值（含端点贴限）时符合性为 `indeterminate`，不得只按中心值通过**。
+   未提供分量时沿用原中心值结果，不确定度明确标为 `not_evaluated`；
+   分量单位冲突、校准范围不覆盖观测值时评估 `invalid` 并逐条列出原因；
+   有效重采样不足（<30 次或 <80%）时总体判 `indeterminate` 并说明。
+   人工移动边界/剔除点后另存版本，不确定度区间与复算参数随该版本独立保存，
+   缺省沿用上一版本输入。配对比较给出指标**差值区间**（检修前−检修后），
+   只有区间整体越过零点才标记 `improved`/`degraded`，跨零为 `indeterminate`。
+   JSON 导出与打印页共用同一组区间和复算参数，报告不另行重算。
 
 **阻断条件**（不得用于维修结论）：校准失效或未提供、单位冲突、关键区段不完整
 （缺开/关/停留段，或运动段数据断档超过 20%）。
@@ -53,7 +67,33 @@ uvicorn app.main:app --port 8000
 
 配对兼容性：两侧都含开/关行程、指令行程跨度相差 ≤5%、负载条件（load/medium）
 一致、同一台阀门，且两侧分析均无阻断问题。响应包含各指标改善量（delta 为正值
-表示改善）、是否回到阈值内、不可比原因、以及检修后仍超限的时段。
+表示改善）、是否回到阈值内、不可比原因、检修后仍超限的时段，以及
+`uncertainty_comparison`：每个指标的检修前/后区间、差值区间与
+`improved/degraded/indeterminate/not_evaluated` 判定（仅差值区间整体越零
+才标记明确改善或退化）。
+
+`uncertainty` 输入示例（提交测试或 `/analyze` 请求体均可；缺省 `n_samples=120`、
+固定 `seed=20260912`）：
+
+```json
+"uncertainty": {
+  "channels": {
+    "command":  {"resolution": {"kind":"resolution","value":0.1,"unit":"%"},
+                 "accuracy":   {"kind":"accuracy","value":0.2,"unit":"%"},
+                 "time_jitter_s": 0.01},
+    "position": {"resolution": {"kind":"resolution","value":0.15,"unit":"%"},
+                 "zero_drift": {"kind":"zero_drift","value":0.1,"unit":"%"},
+                 "time_jitter_s": 0.02},
+    "pressure": {"resolution": {"kind":"resolution","value":1.0,"unit":"kPa"}}
+  },
+  "calibration": {"value":0.2,"unit":"%","applies_to":["command","position"],
+                  "range_min":0,"range_max":100,"range_unit":"%"},
+  "n_samples": 120, "seed": 20260912, "interval_prob": 0.95
+}
+```
+
+分量单位须与通道量纲一致（指令/阀位：`%`、`mA`、`mm/cm/in`；压力：
+`kPa/MPa/bar/psi/kgf/cm2`；时钟抖动：`s`），冲突即评估无效并列原因。
 
 ## 样例
 

@@ -8,6 +8,7 @@ import json
 from datetime import datetime, timezone
 
 from .processing import alignment, detection, metrics, segmentation, units
+from . import uncertainty as unc
 
 
 def _parse_time(s):
@@ -65,8 +66,34 @@ def _steady_state_periods(grid, cmd, pos, segments, threshold):
     return periods
 
 
-def run_analysis(db, test_id, author="auto", new_adjustments=None):
-    """执行分析并保存新版本。new_adjustments: 本次新增的 boundary_moves/exclusions。"""
+def _resolve_uncertainty_input(payload, prev_result, override):
+    """解析本次分析使用的不确定度输入。
+
+    优先级：本次请求显式指定（override 为 dict，或空 dict 表示显式不评估）
+    > 沿用上一分析版本的输入（人工调整边界后另建不确定度版本）
+    > 测试提交中的声明 > None（未评估）。
+    """
+    if override is not None:
+        return override or None
+    if prev_result is not None:
+        prev_unc = prev_result.get("uncertainty") or {}
+        # 仅沿用上一版本实际完成评估（evaluated）的输入；无效/未评估不传播
+        if prev_unc.get("status") == "evaluated":
+            prev_spec = prev_unc.get("input_spec")
+            if prev_spec:
+                return prev_spec
+    return payload.get("uncertainty")
+
+
+def run_analysis(db, test_id, author="auto", new_adjustments=None,
+                 uncertainty_override=None):
+    """执行分析并保存新版本。
+
+    new_adjustments: 本次新增的 boundary_moves/exclusions。
+    uncertainty_override: AnalyzeRequest 中本次指定的不确定度评估输入（dict）；
+    缺省时沿用测试提交 payload 中的声明，两者都没有则指标标为未评估。
+    人工移动分析边界/剔除点后重算会另存新版本，不确定度区间随该版本独立保存。
+    """
     test = db.get_test(test_id)
     if test is None:
         raise KeyError(f"测试 {test_id} 不存在")
@@ -76,9 +103,11 @@ def run_analysis(db, test_id, author="auto", new_adjustments=None):
 
     # 累计历史调整（上一版本）+ 本次新增
     existing = db.list_analyses(test_id)
+    prev_result = None
     cumulative = []
     if existing:
         prev = db.get_analysis(existing[-1]["id"])
+        prev_result = prev["result"]
         cumulative = list(prev["adjustments"])
     for mv in new_adjustments.get("boundary_moves", []):
         cumulative.append({"type": "boundary_move", "author": author, **mv})
@@ -208,6 +237,28 @@ def run_analysis(db, test_id, author="auto", new_adjustments=None):
     else:
         verdict = "ok"
 
+    # 11. 测量不确定度评估（固定种子蒙特卡洛；输入缺省则未评估，沿用中心值结果）
+    unc_input = _resolve_uncertainty_input(payload, prev_result, uncertainty_override)
+    uncertainty_block = unc.evaluate(
+        raw_norm=raw_norm,
+        source_units={c: filtered[c]["unit"] for c in ("command", "position", "pressure")},
+        range_spec={"min": rng["min"], "max": rng["max"]},
+        thresholds=thresholds,
+        manual_boundaries=boundary_moves,
+        input_spec=unc_input,
+        central_metrics={
+            "travel_time": m_travel, "deadband": m_dead, "hysteresis": m_hyst,
+            "overshoot": m_over, "steady_state": m_ss,
+        })
+    # 阻断（单位冲突/校准失效/关键区段缺失）时不得据此给符合性结论
+    if blocking and uncertainty_block.get("status") == "evaluated":
+        uncertainty_block = {
+            **uncertainty_block,
+            "overall_status": "indeterminate",
+            "status": "evaluated",
+            "blocked_note": "本分析版本存在阻断问题，不确定度区间仅供参考，不得用于维修结论",
+        }
+
     result = {
         "test_id": test_id,
         "verdict": verdict,
@@ -233,6 +284,7 @@ def run_analysis(db, test_id, author="auto", new_adjustments=None):
         "thresholds": thresholds,
         "issues": issues,
         "exclusions": exclusion_records,
+        "uncertainty": uncertainty_block,
         "curves": {
             "t": [round(t, 3) for t in grid],
             "command": [round(v, 4) for v in cmd],

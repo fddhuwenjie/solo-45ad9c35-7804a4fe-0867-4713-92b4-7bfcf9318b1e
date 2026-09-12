@@ -1,4 +1,11 @@
-"""检修前后配对：仅在方向、行程范围与负载条件兼容时比较指标改善。"""
+"""检修前后配对：仅在方向、行程范围与负载条件兼容时比较指标改善。
+
+改善判定基于测量不确定度区间：只有指标差值区间（检修前−检修后）整体越过
+零点才标记明确改善/退化；区间跨零为 indeterminate；任一侧未评估时沿用
+中心值差值但明确标为 not_evaluated，不得据中心值直接判定。
+"""
+
+from . import uncertainty as unc
 
 # 参与比较的标量指标：(名称, 取值函数, 阈值键, 单位)
 METRIC_KEYS = [
@@ -8,6 +15,15 @@ METRIC_KEYS = [
     ("overshoot_pct", "过冲", lambda m: m["overshoot"]["max_pct"], "overshoot_pct_max", "%"),
     ("steady_state_pct", "稳态偏差", lambda m: m["steady_state"]["max_pct"], "steady_state_pct_max", "%"),
 ]
+
+# 指标中心值键 → 不确定度块中的指标键
+_UNC_KEY = {
+    "travel_time_s": "travel_time",
+    "deadband_pct": "deadband",
+    "hysteresis_pct": "hysteresis",
+    "overshoot_pct": "overshoot",
+    "steady_state_pct": "steady_state",
+}
 
 TRAVEL_RANGE_TOL_PCT = 5.0  # 两侧指令行程跨度允许偏差
 
@@ -78,11 +94,20 @@ def compare(db, pre_analysis_id, post_analysis_id):
         "incompatible_reasons": reasons,
         "improvements": [],
         "still_exceeding": [],
+        "uncertainty_comparison": [],
     }
     if not compatible:
         return result
 
     thr = post["thresholds"]
+    pre_unc = pre.get("uncertainty") or {}
+    post_unc = post.get("uncertainty") or {}
+    unc_compare = unc.compare_intervals(pre_unc, post_unc)
+    unc_by_key = {e["metric"]: e for e in unc_compare}
+    result["uncertainty_comparison"] = unc_compare
+    pre_evaluated = pre_unc.get("status") == "evaluated"
+    post_evaluated = post_unc.get("status") == "evaluated"
+
     for key, name, getter, thr_key, unit in METRIC_KEYS:
         v_pre = getter(pre["metrics"])
         v_post = getter(post["metrics"])
@@ -94,6 +119,25 @@ def compare(db, pre_analysis_id, post_analysis_id):
             entry["within_threshold"] = v_post <= thr[thr_key]
         else:
             entry["note"] = "一侧指标缺失，不可比"
+
+        # 测量不确定度区间：差值区间整体越零才标记明确改善/退化
+        ue = unc_by_key.get(_UNC_KEY.get(key, key), {})
+        entry["uncertainty_change"] = ue.get("change", "not_evaluated")
+        entry["delta_interval"] = ue.get("delta_interval")
+        if post_evaluated and v_post is not None:
+            pm = post_unc.get("metrics", {}).get(_UNC_KEY.get(key, key)) or {}
+            entry["post_conformance"] = pm.get("status", "indeterminate")
+            entry["post_interval"] = pm.get("interval")
+            # 区间贴限/跨限时不得只按中心值判合格
+            if pm.get("status") == "indeterminate":
+                entry["within_threshold"] = False
+                entry["conformance_note"] = "检修后区间跨越判定限值，符合性不确定"
+            elif pm.get("status") == "pass":
+                entry["within_threshold"] = True
+        else:
+            entry["post_conformance"] = "not_evaluated"
+            if v_pre is not None and v_post is not None:
+                entry["conformance_note"] = "测量不确定度未评估，中心值判定仅供参考"
         result["improvements"].append(entry)
 
     # 卡跳次数对比

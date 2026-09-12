@@ -89,7 +89,9 @@ def create_app(db_path=DEFAULT_DB):
         if db.get_test(test_id) is None:
             raise HTTPException(404, "测试不存在")
         author = body.author if body else "auto"
-        return analysis.run_analysis(db, test_id, author=author)
+        override = body.uncertainty.model_dump() if body and body.uncertainty else None
+        return analysis.run_analysis(db, test_id, author=author,
+                                     uncertainty_override=override)
 
     @app.get("/tests/{test_id}/analyses")
     def list_analyses(test_id: int, db=Depends(get_db)):
@@ -109,12 +111,14 @@ def create_app(db_path=DEFAULT_DB):
             raise HTTPException(404, "分析不存在")
         if not body.boundary_moves and not body.exclusions:
             raise HTTPException(422, "调整请求为空：需包含 boundary_moves 或 exclusions")
+        override = body.uncertainty.model_dump() if body.uncertainty is not None else None
         return analysis.run_analysis(
             db, base["test_id"], author=body.author,
             new_adjustments={
                 "boundary_moves": [m.model_dump() for m in body.boundary_moves],
                 "exclusions": [e.model_dump() for e in body.exclusions],
-            })
+            },
+            uncertainty_override=override)
 
     # ---- 检修前后配对 ----
     @app.post("/pairings", status_code=201)

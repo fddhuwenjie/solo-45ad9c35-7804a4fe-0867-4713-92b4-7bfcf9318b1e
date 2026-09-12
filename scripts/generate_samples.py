@@ -115,6 +115,37 @@ def build(name, phase, profile, pos_fn, dt_cmd, dt_pos, dt_prs, t_end,
                        "steady_state_pct_max": 2.0, "supply_pressure_min_kpa": 300.0,
                        "settle_band_pct": 2.0},
         "calibration_valid_until": "2027-06-30T00:00:00+00:00",
+        "uncertainty": uncertainty_input(),
+    }
+
+
+def uncertainty_input():
+    """典型仪表不确定度声明（固定种子，蒙特卡洛可复现）。"""
+    return {
+        "channels": {
+            "command": {
+                "resolution": {"kind": "resolution", "value": 0.1, "unit": "%"},
+                "accuracy": {"kind": "accuracy", "value": 0.2, "unit": "%"},
+                "time_jitter_s": 0.01,
+            },
+            "position": {
+                "resolution": {"kind": "resolution", "value": 0.15, "unit": "%"},
+                "accuracy": {"kind": "accuracy", "value": 0.25, "unit": "%"},
+                "zero_drift": {"kind": "zero_drift", "value": 0.1, "unit": "%"},
+                "time_jitter_s": 0.02,
+            },
+            "pressure": {
+                "resolution": {"kind": "resolution", "value": 1.0, "unit": "kPa"},
+                "accuracy": {"kind": "accuracy", "value": 2.0, "unit": "kPa"},
+                "time_jitter_s": 0.05,
+            },
+        },
+        "calibration": {
+            "value": 0.2, "unit": "%", "applies_to": ["command", "position"],
+            "range_min": 0, "range_max": 100, "range_unit": "%",
+        },
+        "n_samples": 120, "seed": 20260912, "interval_prob": 0.95,
+        "note": "定位器/压力变送器检定证书分量",
     }
 
 
