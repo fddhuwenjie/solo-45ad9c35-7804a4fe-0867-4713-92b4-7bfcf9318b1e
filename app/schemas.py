@@ -382,3 +382,113 @@ class TSAdjustRequest(BaseModel):
 class TSCompareRequest(BaseModel):
     analysis_ids: list[int] = []
     valve_tag: Optional[str] = None
+
+
+# ===================== 单相液体流量曲线校核 =====================
+
+FlowCharacteristic = Literal["linear", "equal_percentage", "quick_open"]
+
+
+class FCSeriesSet(BaseModel):
+    position: SeriesData = Field(..., description="阀位反馈")
+    flow: SeriesData = Field(..., description="流量计实测体积流量（液相工况）")
+    upstream_pressure: SeriesData = Field(..., description="阀前压力 P1（表压）")
+    downstream_pressure: SeriesData = Field(..., description="阀后压力 P2（表压）")
+    temperature: SeriesData = Field(..., description="介质温度")
+
+
+class FCFluidSpec(BaseModel):
+    name: str = Field("water", description="介质名称（叠加比较时须一致）")
+    density_kg_m3: Optional[float] = Field(
+        None, gt=0, description="工况密度 kg/m³；缺项时全部测点不得进入拟合并判证据不足")
+    vapor_pressure_kpa: Optional[float] = Field(
+        None, ge=0, description="试验温度下饱和蒸气压（绝压）kPa；缺项时无法判别气蚀/闪蒸")
+    critical_pressure_kpa: float = Field(
+        22120.0, gt=0, description="介质临界压力（绝压）kPa，默认水")
+    density_ref_temp_c: Optional[float] = Field(
+        None, description="密度对应的参考温度 °C；提供后超温测点按物性不适用排除")
+
+
+class FCValveSpec(BaseModel):
+    rated_cv: float = Field(..., gt=0, description="额定 Cv（铭牌）")
+    size_dn_mm: float = Field(..., gt=0, description="口径 DN mm")
+    trim: str = Field(..., description="阀内件标识/图号（叠加比较时须一致）")
+    characteristic: FlowCharacteristic
+    liquid_recovery_factor_fl: float = Field(
+        0.9, gt=0, le=1.0, description="液体压力恢复系数 FL（铭牌/选型书）")
+    equal_percentage_r: float = Field(
+        50.0, gt=1.0, description="等百分比/快开基准的可调比 R")
+
+
+class FCMeterSpec(BaseModel):
+    full_scale: float = Field(..., gt=0, description="流量计量程上限（满量程）")
+    unit: str = Field("m3/h", description="流量单位：m3/h、m3/min、l/min、l/h、gpm、gph")
+
+
+class FCThresholds(BaseModel):
+    min_differential_kpa: float = Field(20.0, description="最小有效压差 kPa，低于该值测点不拟合")
+    plateau_band_pct: float = Field(1.0, description="稳态平台阀位波动带 %")
+    plateau_slope_pct_s: float = Field(0.5, description="平台判定：窗口阀位速度阈值 %/s")
+    plateau_min_duration_s: float = Field(3.0, description="平台最短持续时间 s")
+    plateau_merge_gap_s: float = Field(1.5, description="短于该值的平台间抖动间隔并入同一平台")
+    plateau_merge_position_pct: float = Field(
+        2.0, description="相邻平台中位阀位差不超过该值视为同一平台")
+    plateau_drift_pct_max: float = Field(
+        1.5, description="平台内阀位峰峰漂移上限 %，超限按平台漂移排除")
+    plateau_flow_cv_pct_max: float = Field(
+        5.0, description="平台内流量变异系数上限 %，超限按平台漂移排除")
+    temp_applicability_band_c: Optional[float] = Field(
+        None, description="密度参考温度适用带宽 °C，提供后超温测点按物性不适用排除")
+    residual_warn_pct: float = Field(15.0, description="实测 Cv 相对拟合基准的残差告警带 ±%")
+    blockage_scale_max: float = Field(0.85, description="拟合容量系数低于该值疑似堵塞")
+    erosion_scale_min: float = Field(1.15, description="拟合容量系数高于该值疑似冲蚀")
+    reversed_match_ratio: float = Field(
+        0.6, description="镜像行程拟合残差小于正向该倍数且单调下降时疑似反装")
+    monotonic_rho_min: float = Field(0.9, description="Cv-阀位 Spearman 秩相关达到该值判单调")
+
+
+class FCConditions(BaseModel):
+    load: str = Field("online", description="负载条件，如 online / offline / bench")
+    note: str = ""
+
+
+class FCTestSubmission(BaseModel):
+    valve_tag: str
+    valve_description: str = ""
+    phase: Literal["pre", "post", "standalone", "baseline", "periodic"] = "standalone"
+    test_started_at: Optional[str] = None
+    range: RangeSpec = RangeSpec()
+    flow_direction: FlowDirection = "upstream_to_downstream"
+    atmospheric_pressure_kpa: float = Field(
+        101.325, gt=0, description="现场大气压（表压转绝压用）kPa")
+    series: FCSeriesSet
+    fluid: FCFluidSpec = FCFluidSpec()
+    valve: FCValveSpec
+    meter: FCMeterSpec
+    conditions: FCConditions = FCConditions()
+    thresholds: FCThresholds = FCThresholds()
+    calibration_valid_until: Optional[str] = None
+
+
+class FCMovePlateau(BaseModel):
+    plateau_index: int = Field(..., description="按时间排序的平台序号（0 起）")
+    boundary: Literal["start", "end"]
+    new_time: float = Field(..., description="新边界时刻（与采样同一时间轴，秒）")
+    reason: str
+
+
+class FCDisablePoint(BaseModel):
+    plateau_index: int = Field(..., description="停用的稳态平台测点序号（0 起）")
+    reason: str
+
+
+class FCAdjustRequest(BaseModel):
+    author: str
+    plateau_moves: list[FCMovePlateau] = []
+    disabled_points: list[FCDisablePoint] = []
+    note: str = ""
+
+
+class FCCompareRequest(BaseModel):
+    analysis_ids: list[int] = []
+    valve_tag: Optional[str] = None

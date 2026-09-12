@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from . import analysis, pairing, report, schemas
 from .db import Database
 from .failsafe import failsafe_analysis, failsafe_report, trend as fs_trend
+from .flowcurve import compare as fc_compare, fc_analysis, fc_report
 from .seatleak import compare as sl_compare, seat_analysis, seat_report
 from .thrustsignature import (
     compare as ts_compare, thrust_analysis, thrust_report)
@@ -489,6 +490,117 @@ def create_app(db_path=DEFAULT_DB):
         t = db.get_thrust_test(a["thrust_test_id"])
         valve = db.get_valve(t["valve_id"])
         return thrust_report.render_thrust_report(a, t, valve)
+
+    # ===================== 单相液体流量曲线校核 =====================
+
+    @app.post("/flowcurve/tests", status_code=201)
+    def submit_flowcurve_test(body: schemas.FCTestSubmission, db=Depends(get_db)):
+        valve = db.get_valve_by_tag(body.valve_tag)
+        if valve is None:
+            vid = db.create_valve(body.valve_tag, body.valve_description)
+            valve = db.get_valve(vid)
+        payload = body.model_dump()
+        fc_test_id = db.create_flowcurve_test(
+            valve_id=valve["id"],
+            phase=body.phase,
+            test_started_at=body.test_started_at,
+            flow_direction=body.flow_direction,
+            characteristic=body.valve.characteristic,
+            conditions=body.conditions.model_dump(),
+            thresholds=body.thresholds.model_dump(),
+            calibration_valid_until=body.calibration_valid_until,
+            payload=payload,
+        )
+        return {"flowcurve_test_id": fc_test_id, "valve_id": valve["id"]}
+
+    @app.get("/flowcurve/tests/{fc_test_id}")
+    def get_flowcurve_test(fc_test_id: int, db=Depends(get_db)):
+        t = db.get_flowcurve_test(fc_test_id)
+        if not t:
+            raise HTTPException(404, "流量曲线校核测试不存在")
+        t["analyses"] = db.list_flowcurve_analyses(fc_test_id)
+        return t
+
+    @app.post("/flowcurve/tests/{fc_test_id}/analyze", status_code=201)
+    def analyze_flowcurve(fc_test_id: int, body: schemas.AnalyzeRequest | None = None,
+                          db=Depends(get_db)):
+        if db.get_flowcurve_test(fc_test_id) is None:
+            raise HTTPException(404, "流量曲线校核测试不存在")
+        author = body.author if body else "auto"
+        return fc_analysis.run_flowcurve_analysis(db, fc_test_id, author=author)
+
+    @app.get("/flowcurve/tests/{fc_test_id}/analyses")
+    def list_flowcurve_analyses(fc_test_id: int, db=Depends(get_db)):
+        return db.list_flowcurve_analyses(fc_test_id)
+
+    @app.get("/flowcurve/analyses/{analysis_id}")
+    def get_flowcurve_analysis(analysis_id: int, db=Depends(get_db)):
+        a = db.get_flowcurve_analysis(analysis_id)
+        if not a:
+            raise HTTPException(404, "流量曲线分析不存在")
+        return a
+
+    @app.post("/flowcurve/analyses/{analysis_id}/adjust", status_code=201)
+    def adjust_flowcurve(analysis_id: int, body: schemas.FCAdjustRequest,
+                         db=Depends(get_db)):
+        base = db.get_flowcurve_analysis(analysis_id)
+        if not base:
+            raise HTTPException(404, "流量曲线分析不存在")
+        if not body.plateau_moves and not body.disabled_points:
+            raise HTTPException(422, "调整请求为空：需包含 plateau_moves 或 disabled_points")
+        for m in body.plateau_moves:
+            if not m.reason.strip():
+                raise HTTPException(422, "人工移动平台边界必须填写理由")
+        for d in body.disabled_points:
+            if not d.reason.strip():
+                raise HTTPException(422, "停用测点必须填写理由")
+        return fc_analysis.run_flowcurve_analysis(
+            db, base["fc_test_id"], author=body.author,
+            new_adjustments={
+                "plateau_moves": [m.model_dump() for m in body.plateau_moves],
+                "disabled_points": [d.model_dump() for d in body.disabled_points],
+            })
+
+    @app.post("/flowcurve/comparisons", status_code=201)
+    def create_flowcurve_comparison(body: schemas.FCCompareRequest, db=Depends(get_db)):
+        try:
+            if body.analysis_ids:
+                result = fc_compare.compare_flowcurve_tests(
+                    db, analysis_ids=body.analysis_ids)
+            else:
+                if not body.valve_tag:
+                    raise HTTPException(422, "未指定 analysis_ids 时必须提供 valve_tag")
+                result = fc_compare.compare_flowcurve_tests(db, valve_tag=body.valve_tag)
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+        cid = db.create_flowcurve_comparison(result.get("valve_id"), result)
+        return {"comparison_id": cid, **result}
+
+    @app.get("/flowcurve/comparisons/{comparison_id}")
+    def get_flowcurve_comparison(comparison_id: int, db=Depends(get_db)):
+        c = db.get_flowcurve_comparison(comparison_id)
+        if not c:
+            raise HTTPException(404, "比较记录不存在")
+        return c
+
+    @app.get("/flowcurve/analyses/{analysis_id}/export")
+    def export_flowcurve_json(analysis_id: int, db=Depends(get_db)):
+        a = db.get_flowcurve_analysis(analysis_id)
+        if not a:
+            raise HTTPException(404, "流量曲线分析不存在")
+        return JSONResponse(
+            content=a,
+            headers={"Content-Disposition":
+                     f'attachment; filename="flowcurve_{analysis_id}_v{a["version"]}.json"'})
+
+    @app.get("/flowcurve/analyses/{analysis_id}/report", response_class=HTMLResponse)
+    def flowcurve_html_report(analysis_id: int, db=Depends(get_db)):
+        a = db.get_flowcurve_analysis(analysis_id)
+        if not a:
+            raise HTTPException(404, "流量曲线分析不存在")
+        t = db.get_flowcurve_test(a["fc_test_id"])
+        valve = db.get_valve(t["valve_id"])
+        return fc_report.render_fc_report(a, t, valve)
 
     # ---- 请求样例 ----
     @app.get("/samples")

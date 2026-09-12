@@ -132,6 +132,35 @@ CREATE TABLE IF NOT EXISTS thrust_comparisons (
   created_at TEXT NOT NULL,
   result_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS flowcurve_tests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  valve_id INTEGER NOT NULL REFERENCES valves(id),
+  phase TEXT NOT NULL,
+  submitted_at TEXT NOT NULL,
+  test_started_at TEXT,
+  flow_direction TEXT NOT NULL,
+  characteristic TEXT NOT NULL,
+  conditions_json TEXT NOT NULL,
+  thresholds_json TEXT NOT NULL,
+  calibration_valid_until TEXT,
+  payload_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS flowcurve_analyses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  fc_test_id INTEGER NOT NULL REFERENCES flowcurve_tests(id),
+  version INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  author TEXT NOT NULL DEFAULT 'auto',
+  adjustments_json TEXT NOT NULL DEFAULT '[]',
+  result_json TEXT NOT NULL,
+  UNIQUE(fc_test_id, version)
+);
+CREATE TABLE IF NOT EXISTS flowcurve_comparisons (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  valve_id INTEGER,
+  created_at TEXT NOT NULL,
+  result_json TEXT NOT NULL
+);
 """
 
 
@@ -538,6 +567,99 @@ class Database:
     def get_thrust_comparison(self, comparison_id):
         row = self._conn.execute(
             "SELECT * FROM thrust_comparisons WHERE id=?", (comparison_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["result"] = json.loads(d.pop("result_json"))
+        return d
+
+    # ---- 单相液体流量曲线校核 ----
+    def create_flowcurve_test(self, valve_id, phase, test_started_at, flow_direction,
+                              characteristic, conditions, thresholds,
+                              calibration_valid_until, payload):
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """INSERT INTO flowcurve_tests(valve_id, phase, submitted_at,
+                   test_started_at, flow_direction, characteristic, conditions_json,
+                   thresholds_json, calibration_valid_until, payload_json)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (valve_id, phase, _now(), test_started_at, flow_direction,
+                 characteristic, json.dumps(conditions), json.dumps(thresholds),
+                 calibration_valid_until, json.dumps(payload)))
+            return cur.lastrowid
+
+    def get_flowcurve_test(self, fc_test_id):
+        row = self._conn.execute(
+            "SELECT * FROM flowcurve_tests WHERE id=?", (fc_test_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["conditions"] = json.loads(d.pop("conditions_json"))
+        d["thresholds"] = json.loads(d.pop("thresholds_json"))
+        d["payload"] = json.loads(d.pop("payload_json"))
+        return d
+
+    def list_flowcurve_tests(self, valve_id=None):
+        q = ("SELECT id, valve_id, phase, flow_direction, characteristic, "
+             "submitted_at, test_started_at FROM flowcurve_tests")
+        args = ()
+        if valve_id is not None:
+            q += " WHERE valve_id=?"
+            args = (valve_id,)
+        return [dict(r) for r in self._conn.execute(q + " ORDER BY id", args)]
+
+    def create_flowcurve_analysis(self, fc_test_id, author, adjustments, result):
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(version),0) AS v FROM flowcurve_analyses "
+                "WHERE fc_test_id=?", (fc_test_id,)).fetchone()
+            version = row["v"] + 1
+            cur = self._conn.execute(
+                """INSERT INTO flowcurve_analyses(fc_test_id, version, created_at,
+                   author, adjustments_json, result_json) VALUES(?,?,?,?,?,?)""",
+                (fc_test_id, version, _now(), author,
+                 json.dumps(adjustments), json.dumps(result)))
+            return cur.lastrowid, version
+
+    def get_flowcurve_analysis(self, analysis_id):
+        row = self._conn.execute(
+            "SELECT * FROM flowcurve_analyses WHERE id=?", (analysis_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["adjustments"] = json.loads(d.pop("adjustments_json"))
+        d["result"] = json.loads(d.pop("result_json"))
+        return d
+
+    def list_flowcurve_analyses(self, fc_test_id):
+        rows = self._conn.execute(
+            """SELECT id, fc_test_id, version, created_at, author
+               FROM flowcurve_analyses WHERE fc_test_id=? ORDER BY version""",
+            (fc_test_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def latest_flowcurve_analysis_ids(self, valve_id):
+        """同阀门每个流量曲线测次的最新分析版本，按测次时间排序。"""
+        rows = self._conn.execute(
+            """SELECT t.id AS tid,
+                      COALESCE(t.test_started_at, t.submitted_at) AS ttime,
+                      (SELECT a.id FROM flowcurve_analyses a
+                       WHERE a.fc_test_id=t.id ORDER BY a.version DESC LIMIT 1) AS aid
+               FROM flowcurve_tests t WHERE t.valve_id=?
+               ORDER BY ttime, t.id""", (valve_id,)).fetchall()
+        return [(r["tid"], r["aid"], r["ttime"]) for r in rows if r["aid"] is not None]
+
+    def create_flowcurve_comparison(self, valve_id, result):
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """INSERT INTO flowcurve_comparisons(valve_id, created_at, result_json)
+                   VALUES(?,?,?)""", (valve_id, _now(), json.dumps(result)))
+            return cur.lastrowid
+
+    def get_flowcurve_comparison(self, comparison_id):
+        row = self._conn.execute(
+            "SELECT * FROM flowcurve_comparisons WHERE id=?",
+            (comparison_id,)).fetchone()
         if not row:
             return None
         d = dict(row)
