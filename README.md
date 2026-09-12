@@ -41,8 +41,9 @@ uvicorn app.main:app --port 8000
    结果记录样本数、种子、输入分量与同一组复算参数。**分辨率声明值为量化步进，
    均匀扰动半宽取步进的一半（resolution=0.2% → ±0.1%）**。指标 95% 区间**跨越
    判定阈值（含端点贴限）时符合性为 `indeterminate`，不得只按中心值通过**；
-   此时顶层 `verdict` 同步为 `indeterminate`（打印页顶部结论显示“符合性不确定”，
-   不再显示 ok/“正常”），区间整体越过限值时 `verdict` 为 `exceedances`。
+   此时顶层 `verdict` 无论原为 ok 还是 exceedances 都同步为 `indeterminate`
+   （打印页顶部结论显示“符合性不确定”，原有超限/异常事件仍保留在清单中），
+   区间整体越过限值时 `verdict` 为 `exceedances`，阻断（no_conclusion）优先级最高。
    未提供分量时沿用原中心值结果，不确定度明确标为 `not_evaluated`；
    分量单位冲突、校准范围不覆盖观测值时评估 `invalid` 并逐条列出原因；
    有效重采样不足（<30 次或 <80%）时总体判 `indeterminate` 并说明。

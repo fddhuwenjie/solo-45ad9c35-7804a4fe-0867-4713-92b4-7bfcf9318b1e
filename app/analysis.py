@@ -250,18 +250,19 @@ def run_analysis(db, test_id, author="auto", new_adjustments=None,
             "travel_time": m_travel, "deadband": m_dead, "hysteresis": m_hyst,
             "overshoot": m_over, "steady_state": m_ss,
         })
-    # 顶层判定须与不确定度总体符合性一致：任一指标区间跨越判定阈值时
-    # 不得只按中心值给出 ok；区间整体超限时同步标 exceedances。
+    # 顶层判定须与不确定度总体符合性一致：任一指标区间跨越判定阈值（含贴限）
+    # 时，无论中心值判定是 ok 还是已有其他超限（exceedances），verdict 都必须
+    # 跟随 overall_status 为 indeterminate，不得只按中心值给正常/超限结论。
     # 阻断（no_conclusion）优先级最高，保持不变。
     if not blocking and uncertainty_block.get("status") == "evaluated":
         overall = uncertainty_block.get("overall_status")
-        if overall == "indeterminate" and verdict == "ok":
+        if overall == "indeterminate":
             verdict = "indeterminate"
-            if not issues:
+            if not any(i["kind"] == "uncertainty_indeterminate" for i in issues):
                 issues.append({
                     "kind": "uncertainty_indeterminate",
                     "detail": "测量不确定度区间跨越判定阈值（含贴限），符合性不确定，"
-                              "不得只按中心值判为正常",
+                              "不得只按中心值判为正常或超限",
                     "value": None, "threshold": None, "periods": []})
         elif overall == "fail" and verdict == "ok":
             verdict = "exceedances"

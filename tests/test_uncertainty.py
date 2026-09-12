@@ -206,6 +206,49 @@ def test_small_uncertainty_keeps_verdict_ok(client):
     assert res["verdict"] == "ok"
 
 
+def test_verdict_indeterminate_even_with_existing_exceedances(client):
+    """组合反例：已有超限事件（sample_dropout 两条 dropout issue），
+    同时死区区间 [0.0, 2.667] 跨越 2.0 阈值。
+
+    取消“仅原 verdict 为 ok 才同步”的限制后：overall_status=indeterminate
+    必须把顶层 verdict 从 exceedances 改为 indeterminate，打印页顶部结论
+    显示“符合性不确定”，原有 dropout issue 仍保留在问题清单中。
+    """
+    tid = submit_bare(client, "sample_dropout")
+    unc = {
+        "channels": {"position": {
+            "resolution": {"kind": "resolution", "value": 1.6, "unit": "%"},
+            "accuracy": {"kind": "accuracy", "value": 1.2, "unit": "%"}}},
+        "n_samples": 80, "seed": 7,
+    }
+    a = analyze(client, tid, unc)
+    res = a["result"]
+    u = res["uncertainty"]
+    # 前置条件：两条信号断档 issue 与中心值 exceedances
+    dropout_issues = [i for i in res["issues"] if i["kind"] == "dropout"]
+    assert len(dropout_issues) == 2
+    # 死区区间跨越阈值，总体不确定
+    dead = u["metrics"]["deadband"]
+    assert dead["interval"][0] <= dead["threshold"] <= dead["interval"][1]
+    assert dead["status"] == "indeterminate"
+    assert u["overall_status"] == "indeterminate"
+    # 顶层 verdict 必须跟随 overall_status（不能停留在 exceedances/ok）
+    assert res["verdict"] == "indeterminate"
+    kinds = [i["kind"] for i in res["issues"]]
+    assert "uncertainty_indeterminate" in kinds
+    # 原有断档事件不得被吞掉
+    assert kinds.count("dropout") == 2
+    # 打印页顶部结论
+    page = client.get(f"/analyses/{a['id']}/report").text
+    assert "符合性不确定" in page
+    assert '<span class="verdict">存在超限</span>' not in page
+    assert '<span class="verdict">正常</span>' not in page
+    # JSON 导出一致
+    exp = client.get(f"/analyses/{a['id']}/export").json()
+    assert exp["result"]["verdict"] == "indeterminate"
+    assert sum(1 for i in exp["result"]["issues"] if i["kind"] == "dropout") == 2
+
+
 # ---- resolution 均匀扰动半宽 = 声明量化步进 / 2 ----
 
 def test_resolution_halfwidth_is_value_over_two(client):
