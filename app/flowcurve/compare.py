@@ -141,23 +141,24 @@ def compare_flowcurve_tests(db, analysis_ids=None, valve_tag=None):
         curve = r.get("curve") or {}
         adopted = sorted((p for p in r.get("points", []) if p.get("adopted")),
                          key=lambda p: p["position_pct"])
-        fit_by_idx = {id(p): None for p in adopted}
         fit_list = curve.get("fit_cv_by_point") or []
-        for p, fv in zip(adopted, fit_list):
-            fit_by_idx[id(p)] = fv
-        overlay.append({
-            "test_id": t["id"], "analysis_id": a["id"], "version": a["version"],
-            "test_started_at": t.get("test_started_at"), "phase": t["phase"],
-            "points": [{
+        overlay_points = []
+        for k, p in enumerate(adopted):
+            fv = fit_list[k] if k < len(fit_list) else None
+            resid = (round((p["cv"] - fv) / max(fv, 1e-9) * 100.0, 2)
+                     if fv else None)
+            overlay_points.append({
                 "plateau_index": p["plateau_index"],
                 "position_pct": p["position_pct"],
                 "cv": p["cv"],
-                "fit_cv": fit_by_idx.get(id(p)),
-                "residual_pct": (round((p["cv"] - fit_by_idx[id(p)])
-                                       / max(fit_by_idx[id(p)], 1e-9) * 100.0, 2)
-                                 if fit_by_idx.get(id(p)) else None),
+                "fit_cv": fv,
+                "residual_pct": resid,
                 "dp_kpa": p["conversion"]["dp_kpa"],
-            } for p in adopted],
+            })
+        overlay.append({
+            "test_id": t["id"], "analysis_id": a["id"], "version": a["version"],
+            "test_started_at": t.get("test_started_at"), "phase": t["phase"],
+            "points": overlay_points,
             "capacity_factor": curve.get("capacity_factor"),
         })
 

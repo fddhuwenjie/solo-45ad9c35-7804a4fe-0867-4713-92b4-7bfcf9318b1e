@@ -194,7 +194,12 @@ def _diagnose_suspects(points, curve, characteristic, rated_cv, r, thr):
     if not adopted or curve["capacity_factor"] is None:
         return suspects
     k = curve["capacity_factor"]
-    if curve["n_adopted"] >= MIN_POINTS_TO_FIT and k < thr["blockage_scale_max"]:
+    # 容量类结论（堵塞/冲蚀）仅在正向特性确实近似匹配（残差小）时成立；
+    # 正向残差大说明曲线形状不匹配，容量系数失去物理意义（如反装）。
+    shape_matched = (curve["rmse_pct"] is not None
+                     and curve["rmse_pct"] <= thr["residual_warn_pct"])
+    if shape_matched and curve["n_adopted"] >= MIN_POINTS_TO_FIT \
+            and k < thr["blockage_scale_max"]:
         suspects.append({
             "kind": "blockage",
             "detail": f"实测容量系数 k={k:.3f} 低于堵塞判据 "
@@ -203,7 +208,8 @@ def _diagnose_suspects(points, curve, characteristic, rated_cv, r, thr):
             "capacity_factor": k,
             "threshold": thr["blockage_scale_max"],
         })
-    if curve["n_adopted"] >= MIN_POINTS_TO_FIT and k > thr["erosion_scale_min"]:
+    if shape_matched and curve["n_adopted"] >= MIN_POINTS_TO_FIT \
+            and k > thr["erosion_scale_min"]:
         suspects.append({
             "kind": "erosion",
             "detail": f"实测容量系数 k={k:.3f} 高于冲蚀判据 "
@@ -346,7 +352,8 @@ def run_flowcurve_analysis(db, fc_test_id, author="auto", new_adjustments=None):
         p1_a = aligned["upstream_pressure"]
         p2_a = aligned["downstream_pressure"]
         temp_a = aligned["temperature"]
-        full_scale = float(meter["full_scale"])
+        full_scale = float(liquid.FLOW_TO_M3H.get(
+            (meter.get("unit") or "m3/h").strip().lower(), 1.0) * meter["full_scale"])
         cv_params = {
             "atmospheric_pressure_kpa": payload["atmospheric_pressure_kpa"],
             "density_kg_m3": fluid.get("density_kg_m3"),
@@ -361,7 +368,13 @@ def run_flowcurve_analysis(db, fc_test_id, author="auto", new_adjustments=None):
         points = []
         for p in plateaus:
             s0, e0 = p["i_start"], p["i_end"]
+            # 流量/压力/温度统计窗从平台起点后 0.5s 起，避开前一段爬升沿
+            # 插值（位置已稳定但流量仍在爬升），位置统计仍取整段。
+            sf = s0
+            while sf < e0 and grid[sf] < grid[s0] + 0.5:
+                sf += 1
             idx = list(range(s0, e0 + 1))
+            fidx = list(range(sf, e0 + 1))
             rec = {
                 "plateau_index": p["index"],
                 "t_start_s": p["t_start"], "t_end_s": p["t_end"],
@@ -369,11 +382,12 @@ def run_flowcurve_analysis(db, fc_test_id, author="auto", new_adjustments=None):
                 "position_pct": round(_median(pos_a[s0:e0 + 1]), 4),
                 "position_peakpeak_pct": round(
                     max(pos_a[s0:e0 + 1]) - min(pos_a[s0:e0 + 1]), 4),
-                "flow_m3h": round(_median(flow_a[s0:e0 + 1]), 6),
+                "flow_m3h": round(_median(flow_a[sf:e0 + 1]), 6),
                 "flow_cv_pct": None,
-                "p1_gauge_kpa": round(_median(p1_a[s0:e0 + 1]), 3),
-                "p2_gauge_kpa": round(_median(p2_a[s0:e0 + 1]), 3),
-                "temp_c": round(_median(temp_a[s0:e0 + 1]), 3),
+                "p1_gauge_kpa": round(_median(p1_a[sf:e0 + 1]), 3),
+                "p2_gauge_kpa": round(_median(p2_a[sf:e0 + 1]), 3),
+                "temp_c": round(_median(temp_a[sf:e0 + 1]), 3),
+                "eval_window_start_s": round(grid[sf], 3),
                 "order": p["order"],
                 "disabled": p["disabled"],
                 "disable_reason": p["disable_reason"],
@@ -382,6 +396,14 @@ def run_flowcurve_analysis(db, fc_test_id, author="auto", new_adjustments=None):
                 "cv": None, "choked": None,
                 "conversion": None,
                 "raw_refs": {
+                    "window_start": [r for r in (
+                        _raw_ref("position", raw["position"][0], grid[sf],
+                                 raw["position"][1]),
+                        _raw_ref("flow", raw["flow"][0], grid[sf], raw["flow"][1]),
+                        _raw_ref("upstream_pressure", raw["upstream_pressure"][0],
+                                 grid[sf], raw["upstream_pressure"][1]),
+                        _raw_ref("downstream_pressure", raw["downstream_pressure"][0],
+                                 grid[sf], raw["downstream_pressure"][1])) if r],
                     "start": [r for r in (
                         _raw_ref("position", raw["position"][0], grid[s0],
                                  raw["position"][1]),
@@ -393,7 +415,7 @@ def run_flowcurve_analysis(db, fc_test_id, author="auto", new_adjustments=None):
                 },
             }
 
-            fseg = flow_a[s0:e0 + 1]
+            fseg = flow_a[sf:e0 + 1]
             fmean = sum(fseg) / len(fseg)
             if abs(fmean) > 1e-12:
                 rec["flow_cv_pct"] = round(
@@ -415,14 +437,15 @@ def run_flowcurve_analysis(db, fc_test_id, author="auto", new_adjustments=None):
             fmed = rec["flow_m3h"]
             if fmed <= 0:
                 add_reason("nonpositive_flow")
-            elif fmed > full_scale:
+            elif fmed >= full_scale:
+                # 读数持续顶到满量程轨：真流量达到或超过量程上限，读数不可信
                 add_reason("flow_overrange")
 
             conv = liquid.cv_at(
                 fmed, rec["p1_gauge_kpa"], rec["p2_gauge_kpa"], rec["temp_c"],
                 cv_params)
             rec["conversion"] = {
-                "formula": "Cv = Q/(N1·sqrt(ΔP/(ρ/ρ0)))，N1=0.0865（Q:m³/h, ΔP:bar）",
+                "formula": "Cv = Q/(N1·sqrt(ΔP/(ρ/ρ0)))，N1=0.865（Q:m³/h, ΔP:bar）",
                 "q_m3h": conv["q_m3h"], "dp_kpa": conv["dp_kpa"],
                 "p1_abs_kpa": conv["p1_abs_kpa"], "p2_abs_kpa": conv["p2_abs_kpa"],
                 "ff": conv["ff"], "dp_choked_kpa": conv["dp_choked_kpa"],
@@ -443,6 +466,13 @@ def run_flowcurve_analysis(db, fc_test_id, author="auto", new_adjustments=None):
             rec["adopted"] = not rec["exclusion_codes"]
             if rec["adopted"]:
                 rec["cv"] = conv["cv"]
+            # 仅用于展示/导出的诊断 Cv：压差为正且有密度时总是计算，不参与拟合
+            if (cv_params["density_kg_m3"] and conv["dp_kpa"]
+                    and conv["dp_kpa"] > 0):
+                rec["cv_display"] = liquid.liquid_cv(
+                    fmed, conv["dp_kpa"], cv_params["density_kg_m3"])
+            else:
+                rec["cv_display"] = None
                 adopted_intervals.append({
                     "name": f"plateau_{p['index']}",
                     "interval_s": [p["t_start"], p["t_end"]],
@@ -497,15 +527,19 @@ def run_flowcurve_analysis(db, fc_test_id, author="auto", new_adjustments=None):
                           f"{curve_metrics['spearman_rho']}（≥"
                           f"{thr['monotonic_rho_min']:g} 且无逆序）"),
             })
+            shape_ok = (curve_metrics["rmse_pct"] is not None
+                        and curve_metrics["rmse_pct"] <= thr["residual_warn_pct"])
             checks.append({
                 "metric": "capacity_factor",
                 "value": curve_metrics["capacity_factor"],
-                "pass": (thr["blockage_scale_max"] <= curve_metrics["capacity_factor"]
-                         <= thr["erosion_scale_min"]),
+                "pass": (not shape_ok) or (
+                    thr["blockage_scale_max"] <= curve_metrics["capacity_factor"]
+                    <= thr["erosion_scale_min"]),
                 "threshold_band": [thr["blockage_scale_max"],
                                    thr["erosion_scale_min"]],
                 "basis": "实测 Cv 相对铭牌特性曲线的过原点最小二乘容量系数 k"
-                         "（堵塞下限/冲蚀上限）",
+                         "（堵塞下限/冲蚀上限）；正向形状不匹配（RMSE 超残差带）"
+                         "时本项不适用，见嫌疑诊断",
             })
         else:
             evidence_gaps.append({

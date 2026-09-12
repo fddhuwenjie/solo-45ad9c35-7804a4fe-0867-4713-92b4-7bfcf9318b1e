@@ -12,14 +12,22 @@
 
 
 def _window_velocity(grid, pos, win_s=1.0):
-    """居中窗口阀位速度 %/s。"""
+    """居中窗口阀位速度 %/s。
+
+    窗口至少向两侧各取一个采样间隔（网格步长），保证 1 Hz 等粗采样下
+    窗口仍含真实位移信息，而不会退化为单点零速度（把斜坡误判为稳态）。
+    """
     n = len(grid)
+    if n < 2:
+        return [0.0] * n
+    dt_step = grid[1] - grid[0]
+    half = max(win_s / 2.0, dt_step)
     vel = [0.0] * n
     for i in range(n):
         j, k = i, i
-        while j + 1 < n and grid[j + 1] - grid[i] < win_s / 2:
+        while j + 1 < n and grid[j + 1] - grid[i] <= half:
             j += 1
-        while k - 1 >= 0 and grid[i] - grid[k - 1] < win_s / 2:
+        while k - 1 >= 0 and grid[i] - grid[k - 1] <= half:
             k -= 1
         dt = grid[j] - grid[k]
         vel[i] = (pos[j] - pos[k]) / dt if dt > 0 else 0.0

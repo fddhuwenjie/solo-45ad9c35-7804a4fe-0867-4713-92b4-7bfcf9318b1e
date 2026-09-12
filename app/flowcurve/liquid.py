@@ -2,7 +2,9 @@
 
 非阻塞液体、流量单位 m³/h、压力单位 bar、密度 kg/m³ 时：
 
-    Cv = Q / (N1 * sqrt( ΔP / (ρ/ρ0) ))，ρ0 = 999.0 kg/m³（15 °C 水），N1 = 0.0865
+    Cv = Q / (N1 · sqrt( ΔP / (ρ/ρ0) ))，ρ0 = 999.0 kg/m³（15 °C 水），N1 = 0.865
+
+校验：1 US gpm（0.227125 m³/h）水、ΔP = 1 psi（0.06895 bar）→ Cv ≈ 1.0。
 
 阻塞（气蚀/闪蒸）发生在 ΔP > ΔPchoked = FL² · (P1 − Ff·Pv) 时：
 
@@ -29,7 +31,7 @@ FLOW_TO_M3H = {
     "gph": 0.227125 / 60.0,
 }
 
-N1_M3H_BAR = 0.0865
+N1_M3H_BAR = 0.865
 RHO_REF_KG_M3 = 999.0      # 15 °C 参考水密度
 TEMP_OFFSET_K = 273.15
 
@@ -110,6 +112,8 @@ def cv_at(q_m3h, p1_gauge_kpa, p2_gauge_kpa, temp_c, params):
 
     if q_m3h <= 0:
         out["exclusion"] = "nonpositive_flow"
+    if dp is not None and dp <= 0:
+        out["exclusion"] = out["exclusion"] or "insufficient_differential_pressure"
     if p2_abs <= 0 or p1_abs <= 0:
         out["exclusion"] = out["exclusion"] or "pressure_physical"
 
