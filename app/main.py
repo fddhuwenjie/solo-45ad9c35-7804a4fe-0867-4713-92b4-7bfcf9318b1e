@@ -11,6 +11,8 @@ from . import analysis, pairing, report, schemas
 from .db import Database
 from .failsafe import failsafe_analysis, failsafe_report, trend as fs_trend
 from .seatleak import compare as sl_compare, seat_analysis, seat_report
+from .thrustsignature import (
+    compare as ts_compare, thrust_analysis, thrust_report)
 
 SAMPLES_DIR = Path(__file__).resolve().parent.parent / "samples"
 DEFAULT_DB = os.environ.get("VALVE_DB_PATH", str(Path(__file__).resolve().parent.parent / "valve_diag.db"))
@@ -379,6 +381,114 @@ def create_app(db_path=DEFAULT_DB):
         t = db.get_seatleak_test(a["seatleak_test_id"])
         valve = db.get_valve(t["valve_id"])
         return seat_report.render_seat_report(a, t, valve)
+
+    # ===================== 阀杆推力签名测试 =====================
+
+    @app.post("/stemthrust/tests", status_code=201)
+    def submit_thrust_test(body: schemas.TSTestSubmission, db=Depends(get_db)):
+        valve = db.get_valve_by_tag(body.valve_tag)
+        if valve is None:
+            vid = db.create_valve(body.valve_tag, body.valve_description)
+            valve = db.get_valve(vid)
+        payload = body.model_dump()
+        ts_test_id = db.create_thrust_test(
+            valve_id=valve["id"],
+            phase=body.phase,
+            test_started_at=body.test_started_at,
+            actuator_type=body.actuator.actuator_type,
+            conditions=body.conditions.model_dump(),
+            thresholds=body.thresholds.model_dump(),
+            calibration_valid_until=body.calibration_valid_until,
+            payload=payload,
+        )
+        return {"stemthrust_test_id": ts_test_id, "valve_id": valve["id"]}
+
+    @app.get("/stemthrust/tests/{ts_test_id}")
+    def get_thrust_test(ts_test_id: int, db=Depends(get_db)):
+        t = db.get_thrust_test(ts_test_id)
+        if not t:
+            raise HTTPException(404, "阀杆推力测试不存在")
+        t["analyses"] = db.list_thrust_analyses(ts_test_id)
+        return t
+
+    @app.post("/stemthrust/tests/{ts_test_id}/analyze", status_code=201)
+    def analyze_thrust(ts_test_id: int, body: schemas.AnalyzeRequest | None = None,
+                       db=Depends(get_db)):
+        if db.get_thrust_test(ts_test_id) is None:
+            raise HTTPException(404, "阀杆推力测试不存在")
+        author = body.author if body else "auto"
+        return thrust_analysis.run_thrust_analysis(db, ts_test_id, author=author)
+
+    @app.get("/stemthrust/tests/{ts_test_id}/analyses")
+    def list_thrust_analyses(ts_test_id: int, db=Depends(get_db)):
+        return db.list_thrust_analyses(ts_test_id)
+
+    @app.get("/stemthrust/analyses/{analysis_id}")
+    def get_thrust_analysis(analysis_id: int, db=Depends(get_db)):
+        a = db.get_thrust_analysis(analysis_id)
+        if not a:
+            raise HTTPException(404, "阀杆推力分析不存在")
+        return a
+
+    @app.post("/stemthrust/analyses/{analysis_id}/adjust", status_code=201)
+    def adjust_thrust(analysis_id: int, body: schemas.TSAdjustRequest, db=Depends(get_db)):
+        base = db.get_thrust_analysis(analysis_id)
+        if not base:
+            raise HTTPException(404, "阀杆推力分析不存在")
+        if not body.segment_moves and not body.exclusions:
+            raise HTTPException(422, "调整请求为空：需包含 segment_moves 或 exclusions")
+        for m in body.segment_moves:
+            if not m.reason.strip():
+                raise HTTPException(422, "人工移动相位边界必须填写理由")
+        for e in body.exclusions:
+            if not e.reason.strip():
+                raise HTTPException(422, "剔除坏点必须填写理由")
+        return thrust_analysis.run_thrust_analysis(
+            db, base["thrust_test_id"], author=body.author,
+            new_adjustments={
+                "segment_moves": [m.model_dump() for m in body.segment_moves],
+                "exclusions": [e.model_dump() for e in body.exclusions],
+            })
+
+    @app.post("/stemthrust/comparisons", status_code=201)
+    def create_thrust_comparison(body: schemas.TSCompareRequest, db=Depends(get_db)):
+        try:
+            if body.analysis_ids:
+                result = ts_compare.compare_thrust_tests(db, analysis_ids=body.analysis_ids)
+            else:
+                if not body.valve_tag:
+                    raise HTTPException(422, "未指定 analysis_ids 时必须提供 valve_tag")
+                result = ts_compare.compare_thrust_tests(db, valve_tag=body.valve_tag)
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+        cid = db.create_thrust_comparison(result.get("valve_id"), result)
+        return {"comparison_id": cid, **result}
+
+    @app.get("/stemthrust/comparisons/{comparison_id}")
+    def get_thrust_comparison(comparison_id: int, db=Depends(get_db)):
+        c = db.get_thrust_comparison(comparison_id)
+        if not c:
+            raise HTTPException(404, "比较记录不存在")
+        return c
+
+    @app.get("/stemthrust/analyses/{analysis_id}/export")
+    def export_thrust_json(analysis_id: int, db=Depends(get_db)):
+        a = db.get_thrust_analysis(analysis_id)
+        if not a:
+            raise HTTPException(404, "阀杆推力分析不存在")
+        return JSONResponse(
+            content=a,
+            headers={"Content-Disposition":
+                     f'attachment; filename="stemthrust_{analysis_id}_v{a["version"]}.json"'})
+
+    @app.get("/stemthrust/analyses/{analysis_id}/report", response_class=HTMLResponse)
+    def thrust_html_report(analysis_id: int, db=Depends(get_db)):
+        a = db.get_thrust_analysis(analysis_id)
+        if not a:
+            raise HTTPException(404, "阀杆推力分析不存在")
+        t = db.get_thrust_test(a["thrust_test_id"])
+        valve = db.get_valve(t["valve_id"])
+        return thrust_report.render_thrust_report(a, t, valve)
 
     # ---- 请求样例 ----
     @app.get("/samples")

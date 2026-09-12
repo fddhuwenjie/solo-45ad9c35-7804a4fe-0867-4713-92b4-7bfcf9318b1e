@@ -274,3 +274,111 @@ class SLAdjustRequest(BaseModel):
 class SLCompareRequest(BaseModel):
     analysis_ids: list[int] = []
     valve_tag: Optional[str] = None
+
+
+# ===================== 阀杆推力签名测试 =====================
+
+ActuatorType = Literal["single_acting", "double_acting"]
+StemDirection = Literal["down_to_close", "up_to_close"]
+SpringAction = Literal["fail_close", "fail_open"]
+
+
+class TSSeriesSet(BaseModel):
+    command: SeriesData = Field(..., description="指令信号")
+    position: SeriesData = Field(..., description="阀位反馈（0=关位，100=开位）")
+    supply_pressure: SeriesData = Field(..., description="供气（气源）压力")
+    chamber_a_pressure: Optional[SeriesData] = Field(
+        None, description="A 腔压力（开阀侧；单作用执行器的工作腔，必需）")
+    chamber_b_pressure: Optional[SeriesData] = Field(
+        None, description="B 腔压力（关阀侧；仅双作用执行器必需）")
+
+
+class AreaSpec(BaseModel):
+    value: float = Field(..., gt=0, description="有效面积数值")
+    unit: Literal["cm2", "m2", "in2"] = "cm2"
+
+
+class SpringCurve(BaseModel):
+    version: str = Field(..., description="弹簧版本/图号，检修前后比较须一致")
+    action: SpringAction = Field("fail_close", description="弹簧作用方式")
+    force_unit: Literal["n", "kn"] = "n"
+    points: list[list[float]] = Field(
+        ..., min_length=2,
+        description="[[阀位 %, 弹簧力大小（正值）], ...]，按阀位升序，须覆盖试验行程")
+
+
+class TSActuator(BaseModel):
+    actuator_type: ActuatorType
+    area_a: AreaSpec = Field(..., description="A 腔（开阀侧）有效面积")
+    area_b: Optional[AreaSpec] = Field(
+        None, description="B 腔（关阀侧）有效面积；缺省视为与 A 腔相等")
+    spring: Optional[SpringCurve] = Field(
+        None, description="弹簧曲线；单作用执行器必需")
+    stem_direction: StemDirection = "down_to_close"
+
+
+class TSThresholds(BaseModel):
+    breakaway_open_max_n: float = Field(3000.0, description="开阀启动力（净推力峰值）限值 N")
+    breakaway_close_max_n: float = Field(3000.0, description="关阀启动力（净推力峰值）限值 N")
+    running_friction_max_n: float = Field(600.0, description="匀速段运行摩擦力限值 N")
+    friction_band_max_n: float = Field(400.0, description="单方向匀速段摩擦带（推力波动）限值 N")
+    friction_band_total_max_n: float = Field(
+        600.0, description="开/关匀速段中位力之差（总摩擦带/迟滞）限值 N")
+    unseat_open_max_n: float = Field(2500.0, description="开阀离座力（净推力峰值）限值 N")
+    seating_min_n: float = Field(600.0, description="关阀落座最小密封力 N")
+    seating_max_n: float = Field(4000.0, description="关阀落座最大允许压力 N")
+    supply_pressure_min_kpa: float = Field(450.0, description="运动段供气压力下限 kPa")
+    closed_band_pct: float = Field(2.0, description="关位判定带（阀位 ≤ 该值视为在座）")
+    move_detect_pct: float = Field(1.0, description="起程判定：阀位持续偏离初始位置的位移 %")
+    move_sustained_s: float = Field(0.3, description="起程判定持续时间 s")
+    run_margin_pct: float = Field(15.0, description="匀速段距行程两端的位置裕度 %")
+    velocity_min_pct_s: float = Field(2.0, description="匀速段最小阀位速度 %/s")
+    spring_coverage_margin_pct: float = Field(0.5, description="弹簧曲线覆盖试验行程的裕度 %")
+
+
+class TSConditions(BaseModel):
+    load: str = Field("offline", description="负载条件，如 online / offline / bench")
+    medium: str = "air"
+    ambient_temp_c: Optional[float] = None
+    note: str = ""
+
+
+class TSTestSubmission(BaseModel):
+    valve_tag: str
+    valve_description: str = ""
+    phase: Literal["pre", "post", "standalone", "baseline", "periodic"] = "standalone"
+    test_started_at: Optional[str] = None
+    range: RangeSpec = RangeSpec()
+    actuator: TSActuator
+    series: TSSeriesSet
+    conditions: TSConditions = TSConditions()
+    thresholds: TSThresholds = TSThresholds()
+    calibration_valid_until: Optional[str] = None
+
+
+class TSSegmentMove(BaseModel):
+    run: Literal["opening", "closing"]
+    phase: Literal["breakaway", "running", "unseat", "seating"]
+    boundary: Literal["start", "end"]
+    new_time: float
+    reason: str
+
+
+class TSExclusion(BaseModel):
+    channel: Literal["command", "position", "supply_pressure",
+                     "chamber_a_pressure", "chamber_b_pressure"]
+    start_index: int = Field(..., description="原始提交序列中的起始点序号（含）")
+    end_index: int = Field(..., description="原始提交序列中的结束点序号（含）")
+    reason: str
+
+
+class TSAdjustRequest(BaseModel):
+    author: str
+    segment_moves: list[TSSegmentMove] = []
+    exclusions: list[TSExclusion] = []
+    note: str = ""
+
+
+class TSCompareRequest(BaseModel):
+    analysis_ids: list[int] = []
+    valve_tag: Optional[str] = None
