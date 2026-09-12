@@ -656,3 +656,123 @@ class FCAdjustRequest(BaseModel):
 class FCCompareRequest(BaseModel):
     analysis_ids: list[int] = []
     valve_tag: Optional[str] = None
+
+
+# ===================== 限位开关（开/关到位接点）全行程诊断 =====================
+
+ContactPolarity = Literal["NO", "NC"]
+ContactName = Literal["open", "closed"]
+
+
+class LSContactSpec(BaseModel):
+    """单只限位接点的声明：极性与动作/释放位置窗（量程 %）。"""
+    polarity: ContactPolarity = Field(
+        ..., description="常开 NO（到位时接点闭合，raw=1 有效）/ 常闭 NC（到位时断开，raw=0 有效）")
+    actuate_window_pct: list[float] = Field(
+        ..., min_length=2, max_length=2,
+        description="动作位置窗 [lo, hi]（量程 %）：到位动作应落在该窗内")
+    release_window_pct: list[float] = Field(
+        ..., min_length=2, max_length=2,
+        description="释放位置窗 [lo, hi]（量程 %）：离开端点时的释放应落在该窗内")
+
+    @field_validator("actuate_window_pct", "release_window_pct")
+    @classmethod
+    def _check_window(cls, w):
+        lo, hi = float(w[0]), float(w[1])
+        if not (0.0 <= lo <= hi <= 100.0):
+            raise ValueError("位置窗须满足 0 ≤ lo ≤ hi ≤ 100（量程 %）")
+        return [lo, hi]
+
+
+class LSMutualExclusion(BaseModel):
+    """互斥规则：两路接点不允许同时有效。"""
+    enabled: bool = Field(True, description="是否启用互斥检查")
+    max_overlap_s: float = Field(
+        0.0, ge=0, description="允许的最大交叠时长 s，超过判为同时有效异常")
+
+
+class LSSwitchSpec(BaseModel):
+    """两路限位接点规格：极性、位置窗、去抖时长与互斥规则（提交即冻结）。"""
+    open: LSContactSpec = Field(..., description="开到位接点（行程高端）")
+    closed: LSContactSpec = Field(..., description="关到位接点（行程低端）")
+    debounce_s: float = Field(..., gt=0, le=10.0,
+                              description="去抖时长 s：脉冲间隔 ≤ 该值合并为一簇，"
+                                          "持续不足该值的孤立脉冲为毛刺")
+    mutual_exclusion: LSMutualExclusion = LSMutualExclusion()
+
+
+class LSSeriesSet(BaseModel):
+    position: SeriesData = Field(..., description="连续阀位反馈（0=关位，100=开位）")
+    open: SeriesData = Field(..., description="开到位接点状态序列（0/1，单位 bool/di）")
+    closed: SeriesData = Field(..., description="关到位接点状态序列（0/1，单位 bool/di）")
+
+
+class LSThresholds(BaseModel):
+    edge_delay_s_max: float = Field(
+        1.0, description="位置进入位置窗到接点边沿的允许延迟 s（超过判延迟超限）")
+    dispersion_pct_max: float = Field(
+        1.0, description="多循环动作点/释放点峰峰离散度上限（量程 %）")
+    end_dwell_s: float = Field(
+        1.0, description="位置在动作窗内停留达到该时长视为到端（未触发判据）s")
+    move_slope_pct_s: float = Field(
+        0.5, description="运动方向判定的阀位斜率阈值 %/s")
+
+
+class LSConditions(BaseModel):
+    load: str = Field("offline", description="负载条件，如 online / offline / bench")
+    medium: str = "air"
+    note: str = ""
+
+
+class LSTestSubmission(BaseModel):
+    valve_tag: str
+    valve_description: str = ""
+    phase: Literal["pre", "post", "standalone", "baseline", "periodic"] = "standalone"
+    test_started_at: Optional[str] = None
+    range: RangeSpec = RangeSpec()
+    series: LSSeriesSet
+    switch: LSSwitchSpec
+    conditions: LSConditions = LSConditions()
+    thresholds: LSThresholds = LSThresholds()
+    calibration_valid_until: Optional[str] = None
+    calibration_bindings: Optional[dict[str, int]] = Field(
+        None, description="逐通道校准版本绑定 {通道: 校准版本id}；提供后进入逐通道链模式，"
+                          "本测试的测量通道（position）必须绑定有效版本。旧字段 "
+                          "calibration_valid_until 在未提供绑定时继续生效")
+
+
+class LSChannelRebind(BaseModel):
+    """改绑通道：逻辑接点 → 原始提交通道的重映射（须为 open/closed 的一一置换）。"""
+    channel_map: dict[ContactName, ContactName] = Field(
+        ..., description="如 {'open': 'closed', 'closed': 'open'} 表示两路接反互换")
+    reason: str = Field(..., min_length=1, description="改绑理由（必填）")
+
+
+class LSPolarityOverride(BaseModel):
+    """纠正极性：覆盖提交时声明的常开/常闭极性。"""
+    polarities: dict[ContactName, ContactPolarity] = Field(
+        ..., description="如 {'closed': 'NO'}")
+    reason: str = Field(..., min_length=1, description="纠正理由（必填）")
+
+
+class LSIgnoreGlitch(BaseModel):
+    """忽略毛刺：指定接点在时间区间内的脉冲/边沿不再采用（留痕）。"""
+    contact: ContactName
+    t_start: float = Field(..., description="区间起点（与采样同一时间轴，秒）")
+    t_end: float = Field(..., description="区间终点（秒）")
+    reason: str = Field(..., min_length=1, description="忽略理由（必填）")
+
+
+class LSAdjustRequest(BaseModel):
+    author: str
+    channel_rebind: Optional[LSChannelRebind] = None
+    polarity_override: Optional[LSPolarityOverride] = None
+    ignore_glitches: list[LSIgnoreGlitch] = []
+    calibration_bindings: Optional[dict[str, int]] = Field(
+        None, description="可选：改绑逐通道校准版本（派生新版本；旧分析不变）；空对象 {} 回到 legacy")
+    note: str = ""
+
+
+class LSCompareRequest(BaseModel):
+    analysis_ids: list[int] = []
+    valve_tag: Optional[str] = None

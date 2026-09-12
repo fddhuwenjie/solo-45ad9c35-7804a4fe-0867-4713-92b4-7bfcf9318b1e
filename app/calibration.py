@@ -110,6 +110,8 @@ TEST_CHANNELS = {
                "chamber_a_pressure", "chamber_b_pressure"),
     "flowcurve": ("position", "flow", "upstream_pressure",
                   "downstream_pressure", "temperature"),
+    # 限位开关（open/closed 为离散接点，不是测量通道）
+    "limitswitch": ("position",),
 }
 
 

@@ -11,6 +11,7 @@ from . import analysis, calibration as calchain, pairing, report, schemas
 from .db import Database
 from .failsafe import failsafe_analysis, failsafe_report, trend as fs_trend
 from .flowcurve import compare as fc_compare, fc_analysis, fc_report
+from .limitswitch import compare as ls_compare, ls_analysis, ls_report
 from .seatleak import compare as sl_compare, seat_analysis, seat_report
 from .thrustsignature import (
     compare as ts_compare, thrust_analysis, thrust_report)
@@ -671,6 +672,136 @@ def create_app(db_path=DEFAULT_DB):
         t = db.get_flowcurve_test(a["fc_test_id"])
         valve = db.get_valve(t["valve_id"])
         return fc_report.render_fc_report(a, t, valve)
+
+    # ===================== 限位开关（开/关到位接点）诊断 =====================
+
+    @app.post("/limitswitch/tests", status_code=201)
+    def submit_limitswitch_test(body: schemas.LSTestSubmission, db=Depends(get_db)):
+        valve = db.get_valve_by_tag(body.valve_tag)
+        if valve is None:
+            vid = db.create_valve(body.valve_tag, body.valve_description)
+            valve = db.get_valve(vid)
+        payload = body.model_dump()
+        ls_test_id = db.create_limitswitch_test(
+            valve_id=valve["id"],
+            phase=body.phase,
+            test_started_at=body.test_started_at,
+            range_min=body.range.min,
+            range_max=body.range.max,
+            range_unit=body.range.unit,
+            conditions=body.conditions.model_dump(),
+            thresholds=body.thresholds.model_dump(),
+            calibration_valid_until=body.calibration_valid_until,
+            payload=payload,
+        )
+        return {"limitswitch_test_id": ls_test_id, "valve_id": valve["id"]}
+
+    @app.get("/limitswitch/tests/{ls_test_id}")
+    def get_limitswitch_test(ls_test_id: int, db=Depends(get_db)):
+        t = db.get_limitswitch_test(ls_test_id)
+        if not t:
+            raise HTTPException(404, "限位开关测试不存在")
+        t["analyses"] = db.list_limitswitch_analyses(ls_test_id)
+        return t
+
+    @app.post("/limitswitch/tests/{ls_test_id}/analyze", status_code=201)
+    def analyze_limitswitch(ls_test_id: int, body: schemas.AnalyzeRequest | None = None,
+                            db=Depends(get_db)):
+        if db.get_limitswitch_test(ls_test_id) is None:
+            raise HTTPException(404, "限位开关测试不存在")
+        author = body.author if body else "auto"
+        bindings = body.calibration_bindings if body else None
+        return ls_analysis.run_limitswitch_analysis(
+            db, ls_test_id, author=author, bindings_override=bindings)
+
+    @app.get("/limitswitch/tests/{ls_test_id}/analyses")
+    def list_limitswitch_analyses(ls_test_id: int, db=Depends(get_db)):
+        return db.list_limitswitch_analyses(ls_test_id)
+
+    @app.get("/limitswitch/analyses/{analysis_id}")
+    def get_limitswitch_analysis(analysis_id: int, db=Depends(get_db)):
+        a = db.get_limitswitch_analysis(analysis_id)
+        if not a:
+            raise HTTPException(404, "限位开关分析不存在")
+        return a
+
+    @app.post("/limitswitch/analyses/{analysis_id}/adjust", status_code=201)
+    def adjust_limitswitch(analysis_id: int, body: schemas.LSAdjustRequest,
+                           db=Depends(get_db)):
+        base = db.get_limitswitch_analysis(analysis_id)
+        if not base:
+            raise HTTPException(404, "限位开关分析不存在")
+        if body.channel_rebind is None and body.polarity_override is None \
+                and not body.ignore_glitches and body.calibration_bindings is None:
+            raise HTTPException(422, "调整请求为空：需包含 channel_rebind、"
+                                     "polarity_override、ignore_glitches 或 calibration_bindings")
+        new_adj = {}
+        if body.channel_rebind is not None:
+            if not body.channel_rebind.reason.strip():
+                raise HTTPException(422, "改绑通道必须填写理由")
+            cmap = body.channel_rebind.channel_map
+            if set(cmap.keys()) != {"open", "closed"} \
+                    or set(cmap.values()) != {"open", "closed"}:
+                raise HTTPException(422, "channel_map 须为 open/closed 的一一置换")
+            new_adj["channel_rebind"] = body.channel_rebind.model_dump()
+        if body.polarity_override is not None:
+            if not body.polarity_override.reason.strip():
+                raise HTTPException(422, "纠正极性必须填写理由")
+            new_adj["polarity_override"] = body.polarity_override.model_dump()
+        for ig in body.ignore_glitches:
+            if not ig.reason.strip():
+                raise HTTPException(422, "忽略毛刺必须填写理由")
+            if ig.t_end < ig.t_start:
+                raise HTTPException(422, "忽略毛刺区间终点不得早于起点")
+        new_adj["ignore_glitches"] = [g.model_dump() for g in body.ignore_glitches]
+        new_adj["calibration_bindings"] = body.calibration_bindings
+        return ls_analysis.run_limitswitch_analysis(
+            db, base["ls_test_id"], author=body.author,
+            new_adjustments=new_adj,
+            bindings_override=body.calibration_bindings)
+
+    @app.post("/limitswitch/comparisons", status_code=201)
+    def create_limitswitch_comparison(body: schemas.LSCompareRequest,
+                                      db=Depends(get_db)):
+        try:
+            if body.analysis_ids:
+                result = ls_compare.compare_limitswitch_tests(
+                    db, analysis_ids=body.analysis_ids)
+            else:
+                if not body.valve_tag:
+                    raise HTTPException(422, "未指定 analysis_ids 时必须提供 valve_tag")
+                result = ls_compare.compare_limitswitch_tests(
+                    db, valve_tag=body.valve_tag)
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+        cid = db.create_limitswitch_comparison(result.get("valve_id"), result)
+        return {"comparison_id": cid, **result}
+
+    @app.get("/limitswitch/comparisons/{comparison_id}")
+    def get_limitswitch_comparison(comparison_id: int, db=Depends(get_db)):
+        c = db.get_limitswitch_comparison(comparison_id)
+        if not c:
+            raise HTTPException(404, "比较记录不存在")
+        return c
+
+    @app.get("/limitswitch/analyses/{analysis_id}/export")
+    def export_limitswitch_json(analysis_id: int, db=Depends(get_db)):
+        a = db.get_limitswitch_analysis(analysis_id)
+        if not a:
+            raise HTTPException(404, "限位开关分析不存在")
+        return JSONResponse(
+            content=a,
+            headers={"Content-Disposition":
+                     f'attachment; filename="limitswitch_{analysis_id}_v{a["version"]}.json"'})
+
+    @app.get("/limitswitch/analyses/{analysis_id}/report", response_class=HTMLResponse)
+    def limitswitch_html_report(analysis_id: int, db=Depends(get_db)):
+        a = db.get_limitswitch_analysis(analysis_id)
+        if not a:
+            raise HTTPException(404, "限位开关分析不存在")
+        t = db.get_limitswitch_test(a["ls_test_id"])
+        valve = db.get_valve(t["valve_id"])
+        return ls_report.render_ls_report(a, t, valve)
 
     # ---- 请求样例 ----
     @app.get("/samples")
