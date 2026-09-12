@@ -21,6 +21,9 @@
 - sample_seatleak_low_dp           有效压差不足（50 kPa < 100）→ 证据缺口
 - sample_seatleak_unstable_position 保持段关位未稳定（周期性抬起到 2.8%）→ 证据缺口
 - sample_seatleak_blank_uncovered  试验温度 40°C 超出空白基线包络 → 证据缺口
+- sample_seatleak_reverse_leaking  反向流动（下游→上游）：封闭容积在高压下游侧
+                                   （500 kPa），上游 150 kPa，内漏 0.30 Nl/min 使
+                                   下游降压，温压补偿按流向符号换算后判泄漏超限
 """
 
 import json
@@ -86,14 +89,18 @@ def make_temp_fn(t0_c=T_ISO_C, t1_c=25.0, tau=8.0, ramp=None):
     return temp_at
 
 
-def downstream_at(t, leak_nl_min, temp_fn, t_iso_c=T_ISO_C, blank_rate=BLANK_RATE):
-    """封闭容积压力：泄漏与空白回升按隔离温度折算，热平衡按理想气体跟随温度。"""
+def downstream_at(t, leak_nl_min, temp_fn, t_iso_c=T_ISO_C, blank_rate=BLANK_RATE,
+                  p_down0=P_DOWN):
+    """封闭容积压力：泄漏与空白回升按隔离温度折算，热平衡按理想气体跟随温度。
+
+    leak_nl_min 为正：上游→下游内漏，下游升压；为负：下游→上游内漏，下游降压。
+    """
     if t < T_ISO:
-        return P_DOWN
+        return p_down0
     leak_kpa = leak_nl_min * kpa_per_nl_min(t_iso_c) * (t - T_ISO) / 60.0
     blank_kpa = blank_rate * (t - T_ISO) / 60.0
     t_k = temp_fn(t) + 273.15
-    return (P_DOWN + leak_kpa) * t_k / (t_iso_c + 273.15) + blank_kpa
+    return (p_down0 + leak_kpa) * t_k / (t_iso_c + 273.15) + blank_kpa
 
 
 def series(ts, fn, digits, seed, noise):
@@ -147,7 +154,7 @@ def base_payload(name, tag, started, phase="periodic", explicit_hold=False,
 
 
 def build_series(payload, *, leak_nl_min, temp_fn, unstable_pos=False,
-                 p_up=P_UP, flow_nl_min=None, temp_gap=None, seed=3):
+                 p_up=P_UP, p_down0=P_DOWN, flow_nl_min=None, temp_gap=None, seed=3):
     ts_cmd = make_times(0.2, offset=0.0)
     ts_pos = make_times(0.5, offset=0.11)
     ts_up = make_times(1.0, offset=0.23)
@@ -162,7 +169,8 @@ def build_series(payload, *, leak_nl_min, temp_fn, unstable_pos=False,
         "upstream_pressure": {"unit": "kPa", "points": series(
             ts_up, lambda t: p_up, 2, seed + 2, 0.4)},
         "downstream_pressure": {"unit": "kPa", "points": series(
-            ts_dn, lambda t: downstream_at(t, leak_nl_min, temp_fn), 3, seed + 3, 0.05)},
+            ts_dn, lambda t: downstream_at(t, leak_nl_min, temp_fn, p_down0=p_down0),
+            3, seed + 3, 0.05)},
         "downstream_temp": {"unit": "c", "points": series(ts_tp, temp_fn, 3, seed + 4, 0.02)},
     }
     if flow_nl_min is not None:
@@ -248,6 +256,21 @@ def s_blank_uncovered():
                         temp_fn=make_temp_fn(t0_c=39.2, t1_c=40.0), seed=91)
 
 
+def s_reverse_leaking():
+    # 反向流动（下游→上游）：封闭容积在高压下游侧（500 kPa），上游 150 kPa，
+    # 有效压差 = -(150-500) = 350 kPa；内漏 0.30 Nl/min 使下游压力下降。
+    # 空白基线高压点扩展到 550 kPa，使包络覆盖 500 kPa 封闭容积。
+    p = base_payload("sample_seatleak_reverse_leaking", "XV-509",
+                     "2026-08-12T08:00:00+00:00")
+    p["flow_direction"] = "downstream_to_upstream"
+    p["blank_baseline"]["points"] = [
+        {"temp_c": 15.0, "pressure_kpa": 120.0, "recovery_rate_kpa_min": 0.08},
+        {"temp_c": 35.0, "pressure_kpa": 550.0, "recovery_rate_kpa_min": 0.16},
+    ]
+    return build_series(p, leak_nl_min=-0.30, temp_fn=make_temp_fn(),
+                        p_up=150.0, p_down0=500.0, seed=101)
+
+
 def main():
     OUT.mkdir(exist_ok=True)
     samples = {
@@ -261,6 +284,7 @@ def main():
         "sample_seatleak_low_dp": s_low_dp(),
         "sample_seatleak_unstable_position": s_unstable_position(),
         "sample_seatleak_blank_uncovered": s_blank_uncovered(),
+        "sample_seatleak_reverse_leaking": s_reverse_leaking(),
     }
     for name, payload in samples.items():
         path = OUT / f"{name}.json"
