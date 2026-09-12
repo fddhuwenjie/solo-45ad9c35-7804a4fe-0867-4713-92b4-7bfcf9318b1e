@@ -75,6 +75,36 @@ curl -X POST localhost:8000/pairings -H 'Content-Type: application/json' \
      -d '{"pre_analysis_id":1,"post_analysis_id":2}'
 ```
 
+样例快速体验见各模块 `scripts/generate_*_samples.py` 与 `/samples/{name}` 端点。
+
+## 阀杆推力签名（/stemthrust）
+
+阀门走完全行程后，单路执行器压力无法区分卡涩来自执行机构还是阀体。本模块在
+异频序列（指令、阀位、供气压力、一个或两个工作腔压力）上按阀位运动切分开/关
+行程，再细分**启程、匀速、换向、离座、落座**五类区段，按
+`净推力 = 压差×有效面积 ± 弹簧力`（开阀方向为正）计算推力签名，输出开/关
+启动力、运行摩擦（匀速段中位力绝对值）、摩擦带（段内峰峰 + 开/关中位力之差）、
+开阀离座力、落座力与落座裕量，并对每个异常区间标注嫌疑来源
+（执行机构 / 阀体填料 / 阀座负载）。
+
+- 单作用执行器需 A 腔压力 + 弹簧曲线（版本化，须覆盖试验行程，含覆盖裕度）；
+  双作用执行器需 A、B 两腔压力。必需压力通道缺失、通道时间无重叠、参数量纲
+  不符、校准缺失/失效、弹簧曲线不覆盖行程或关键相位无法圈定时，只给
+  `no_conclusion` 与证据缺口。
+- 复核人移动相位边界或剔除坏点必须填写理由，结果另存为不可覆盖的新版本。
+- 检修前后比较（`POST /stemthrust/comparisons`）仅在执行器结构、阀杆方向、
+  有效面积（±2%）、弹簧版本与负载条件（load/medium）兼容时定量比较；
+  不兼容逐条给出不可比原因，含证据缺口的版本不参与数值比较。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/stemthrust/tests` | 提交推力签名测试（执行器类型/面积/弹簧曲线/异频序列） |
+| POST | `/stemthrust/tests/{id}/analyze` | 执行分析，生成版本 |
+| POST | `/stemthrust/analyses/{id}/adjust` | 移动相位边界 / 剔除坏点 → 新版本（须带理由） |
+| POST | `/stemthrust/comparisons` | 检修前后比较（可按 analysis_ids 或 valve_tag） |
+| GET | `/stemthrust/analyses/{id}/export` | 导出 JSON（区段、指标、采用区间、不可比原因） |
+| GET | `/stemthrust/analyses/{id}/report` | 打印报告（阀位/压力/净推力 SVG、相位与来源嫌疑） |
+
 ## 测试
 
 ```bash

@@ -118,7 +118,7 @@ def compare_thrust_tests(db, analysis_ids=None, valve_tag=None):
         if (t["id"], a["id"]) != (ref_t["id"], ref_a["id"]):
             entry["reasons"] += _compatibility(ref_r, r)
         if r["verdict"] == "no_conclusion":
-            gaps = "；".join(sorted({g["code"]} for g in r["evidence_gaps"]))
+            gaps = "；".join(sorted({g["code"] for g in r["evidence_gaps"]}))
             entry["reasons"].append(f"该版本存在证据缺口（{gaps}），数值不参与比较")
         entry["comparable"] = not entry["reasons"]
         if not entry["comparable"]:

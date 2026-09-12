@@ -49,7 +49,7 @@ A_M2 = AREA_CM2 * 1e-4          # 0.02 m²
 FS_0, FS_100 = 1300.0, 3000.0   # 弹簧预紧 / 满行程弹簧力 N
 P_SUPPLY = 500.0                # 供气 kPa
 T_MOVE = T0_OPEN_CMD + 0.5      # 开阀开始移动（启程结束）
-BREAKAWAY_TAU = 0.3             # 启程附加压力峰值衰减时间常数
+BREAKAWAY_TAU = 0.06            # 启程附加压力峰值衰减时间常数
 
 
 T_MOVE = T_O_MOVE             # 开阀开始移动（启程结束）
@@ -205,6 +205,7 @@ def make_payload(*, name, tag="TV-701", phase="standalone", actuator_type="singl
                  f_run=250.0, breakaway_extra=0.0, unseat_extra=0.0, seat_extra=0.0,
                  area_value=AREA_CM2, area_unit="cm2", area_b=None, spring=None,
                  include_a=True, include_b=False, a_time_shift=None,
+                 pos_unit="%",
                  calibration="2027-06-30T00:00:00+00:00", started="2026-08-20T09:00:00+00:00",
                  load="offline", thresholds=None):
     t_cmd = times(0.05)
@@ -218,7 +219,12 @@ def make_payload(*, name, tag="TV-701", phase="standalone", actuator_type="singl
     t_b = times(0.5)
 
     cmd = series(((t, command_at(t)) for t in t_cmd), "%")
-    pos = series(((t, position_at(t) + random.uniform(-0.05, 0.05)) for t in t_pos), "%")
+    if pos_unit == "mm":
+        # 量纲冲突：阀位以 mm 给出但量程声明为 %
+        pos = series(((t, position_at(t) * 0.15) for t in t_pos), "mm")
+    else:
+        pos = series(((t, position_at(t) + random.uniform(-0.05, 0.05))
+                      for t in t_pos), "%")
     sup = series(((t, supply_at(t)) for t in t_sup), "kpa", clamp_nonneg=True)
     s = {"command": cmd, "position": pos, "supply_pressure": sup}
     double = actuator_type == "double_acting"
@@ -282,8 +288,8 @@ SAMPLES = {
                                         include_b=True, seat_extra=3600.0,
                                         f_run=200.0),
     "sample_thrust_missing_chamber": dict(name="missing-chamber", include_a=False),
-    "sample_thrust_no_overlap": dict(name="no-overlap", a_time_shift=90.0),
-    "sample_thrust_bad_area_unit": dict(name="bad-area-unit", area_unit="mm2"),
+    "sample_thrust_no_overlap": dict(name="no-overlap", a_time_shift=30.0),
+    "sample_thrust_unit_conflict": dict(name="unit-conflict", pos_unit="mm"),
     "sample_thrust_cal_expired": dict(name="cal-expired",
                                       calibration="2025-01-01T00:00:00+00:00"),
     "sample_thrust_spring_short": dict(name="spring-short",

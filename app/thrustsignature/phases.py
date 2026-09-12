@@ -163,9 +163,9 @@ def _sustained_move_index(grid, pos, i0, i1, direction, move_pct, sustained_s,
     def holds(i, need, dur=None):
         k = i
         dur = sustained_s if dur is None else dur
-        while k + 1 <= i1 and grid[k + 1] - grid[i] < dur:
+        while k + 1 <= i1 and grid[k] - grid[i] + 1e-9 < dur:
             k += 1
-        return (grid[k] - grid[i] >= dur
+        return (grid[k] - grid[i] + 1e-9 >= dur
                 and all(direction * (pos[j] - x0) >= need for j in range(i, k + 1)))
 
     # 第一判据：持续位移 ≥ move_pct
