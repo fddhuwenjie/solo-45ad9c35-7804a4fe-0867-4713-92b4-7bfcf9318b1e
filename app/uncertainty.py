@@ -122,8 +122,10 @@ def _build_channel_inputs(raw_norm, source_units, rng_spec, cal,
 
     calibration_components: 逐通道校准链冻结版本的标准不确定度分量
     [{channel, value, unit, distribution="normal", instrument_serial,
-      calibration_version_id}, ...]。仅当该通道在显式输入中没有声明
-    calibration 分量、也没有统一 calibration 块覆盖时才注入，避免重复计列。
+      calibration_version_id}, ...]。通道一旦绑定冻结证书版本，其校准
+    standard_uncertainty 只取该证书值：旧通用 calibration 块与逐通道
+    calibration 分量都不得覆盖（跳过并在记录中标注 suppressed_by_chain）；
+    其余未绑定通道继续兼容旧字段。
     返回 (channel_inputs, component_records, reasons)。
     任一分量单位冲突 → 整体无效（reasons 非空）。
     """
@@ -132,7 +134,26 @@ def _build_channel_inputs(raw_norm, source_units, rng_spec, cal,
     records = []
     reasons = []
 
+    # 绑定冻结证书版本的通道：校准标准不确定度以证书为准，旧配置被抑制
+    chain_bound = {}
+    for cc in (calibration_components or []):
+        if cc.get("channel") in CHANNELS:
+            chain_bound[cc["channel"]] = cc
+
     def add_component(channel, comp, source):
+        # 绑定冻结证书版本的通道：旧 calibration 分量不得覆盖证书标准不确定度
+        if comp["kind"] == "calibration" and channel in chain_bound:
+            cert = chain_bound[channel]
+            records.append({
+                "channel": channel, "kind": "calibration",
+                "source": source, "status": "suppressed_by_chain",
+                "declared": {"value": comp["value"], "unit": comp["unit"]},
+                "note": ("该通道已冻结校准版本 "
+                         f"#{cert.get('calibration_version_id')}"
+                         f"（{cert.get('instrument_serial')}），"
+                         "旧校准分量以证书 standard_uncertainty 为准，不参与扰动"),
+            })
+            return
         try:
             scale, distribution = _component_normalized(comp, channel, span)
         except ValueError as e:
@@ -184,6 +205,19 @@ def _build_channel_inputs(raw_norm, source_units, rng_spec, cal,
                 "distribution": cal.get("distribution", "normal")}
         ru = (cal.get("range_unit") or cal["unit"] or "").strip().lower()
         for ch in cal.get("applies_to") or CHANNELS:
+            # 已绑定冻结证书的通道：旧通用 calibration 块不覆盖该通道
+            # （含覆盖范围检查），其校准标准不确定度只取证书值
+            if ch in chain_bound:
+                records.append({
+                    "channel": ch, "kind": "calibration",
+                    "source": "calibration", "status": "suppressed_by_chain",
+                    "declared": {"value": cal["value"], "unit": cal["unit"]},
+                    "note": ("该通道已冻结校准版本 "
+                             f"#{chain_bound[ch].get('calibration_version_id')}"
+                             f"（{chain_bound[ch].get('instrument_serial')}），"
+                             "旧通用 calibration 块不覆盖该通道"),
+                })
+                continue
             # 校准分量单位须与应用通道量纲一致
             try:
                 _component_normalized(comp, ch, span)
@@ -211,19 +245,9 @@ def _build_channel_inputs(raw_norm, source_units, rng_spec, cal,
                                      "observed_min": round(obs_lo, 4),
                                      "observed_max": round(obs_hi, 4)}
 
-    # 逐通道校准链冻结版本的标准不确定度（链模式）。仅在显式输入未为该通道
-    # 声明校准分量、且无统一 calibration 块覆盖时注入，避免同一影响重复计列。
-    explicit_channels = set()
-    if cal:
-        explicit_channels.update(cal.get("applies_to") or CHANNELS)
-    for cc in (calibration_components or []):
-        ch = cc.get("channel")
-        if ch not in CHANNELS:
-            continue
-        if ch in explicit_channels:
-            continue
-        if any(r["channel"] == ch and r["kind"] == "calibration" for r in records):
-            continue
+    # 逐通道校准链冻结版本的标准不确定度（链模式）。绑定通道一律注入证书值；
+    # 其旧 calibration 分量已在上面被抑制，不会重复计列。
+    for ch, cc in chain_bound.items():
         comp = {"kind": "calibration", "value": cc["value"], "unit": cc.get("unit"),
                 "distribution": cc.get("distribution", "normal")}
         try:

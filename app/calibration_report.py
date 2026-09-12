@@ -85,7 +85,8 @@ def render_calibration_section(result):
                      if chain.get("accepted") else
                      '<p class="bad">存在被拒绝通道，本版本不得形成诊断结论（no_conclusion）。</p>')
     return f"""<h2>逐通道仪器校准链</h2>
-<p class="reason">测试时间区间 {esc(iv_txt)}（采样跨度 {chain.get('test_span_s')} s）。
+<p class="reason">测试时间区间 {esc(iv_txt)}（起点 test_started_at，终点 = 起点 + 所有通道最大样本时标
+{chain.get('test_max_t_s')} s）。
 每路时序在分析时冻结一个不可变证书版本，先按示值—参考值点列分段线性修正，
 再进入时间对齐、不确定度与指标计算。</p>
 <table><thead><tr><th>通道</th><th>状态</th><th>仪器序列号</th><th>证书版本</th>

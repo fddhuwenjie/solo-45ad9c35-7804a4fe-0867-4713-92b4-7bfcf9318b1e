@@ -29,26 +29,32 @@ from .processing.units import PRESSURE_TO_KPA, TRAVEL_UNITS
 # 指令信号（% 与 4-20mA 同族，可互转；物理行程不属于本族）
 SIGNAL_UNITS = ("%", "ma")
 # 温度
-TEMP_UNITS = ("c", "k", "f")
+# 温度（既有分析 gas.norm_temperature 支持的全部等价写法）
+TEMP_ALIASES = {
+    "c": "c", "°c": "c", "degc": "c", "celsius": "c",
+    "k": "k", "kelvin": "k",
+    "f": "f", "°f": "f", "fahrenheit": "f",
+}
+TEMP_UNITS = tuple(TEMP_ALIASES.keys())
 # 标准状态气体流量
 FLOW_GAS_UNITS = tuple(gas_units.FLOW_TO_NL_MIN.keys())
-# 液体工况体积流量
+# 液体工况体积流量（含 m³/h 等既有分析已支持的 Unicode 写法）
 FLOW_LIQUID_UNITS = tuple(liquid_units.FLOW_TO_M3H.keys())
 
 MEASUREMENT_TYPES = (
     "command", "position", "pressure", "temperature", "flow_gas", "flow_liquid",
 )
 
-# 各测量类型单位族内到基准单位的乘数
+# 各测量类型单位族内到基准单位的乘数（温度为仿射换算，乘数仅用于族归属判断）
 _FACTORS = {
     "command": {"%": 1.0, "ma": 1.0},
     "position": {"%": 1.0, "ma": 1.0,
                  **{u: 1.0 for u in TRAVEL_UNITS}},
     "pressure": dict(PRESSURE_TO_KPA),
-    "temperature": {"c": 1.0, "k": 1.0, "f": 1.0},
+    "temperature": {u: 1.0 for u in TEMP_ALIASES},
     "flow_gas": {u: f for u, f in gas_units.FLOW_TO_NL_MIN.items()},
-    "flow_liquid": {u: f for u, f in liquid_units.FLOW_TO_M3H.items()
-                    if u.isascii()},
+    # 保留 m³/h、m³/min、l/min、l/h 等 Unicode 等价写法（与流量曲线分析一致）
+    "flow_liquid": {u: f for u, f in liquid_units.FLOW_TO_M3H.items()},
 }
 
 # 各测量类型基准单位（族内换算目标）
@@ -167,6 +173,7 @@ def convert_value(value, from_unit, to_unit, measurement_type,
 
 
 def _to_celsius(value, u):
+    u = TEMP_ALIASES.get(u, u)
     if u == "c":
         return float(value)
     if u == "k":
@@ -177,6 +184,7 @@ def _to_celsius(value, u):
 
 
 def _from_celsius(c, u):
+    u = TEMP_ALIASES.get(u, u)
     if u == "c":
         return float(c)
     if u == "k":
@@ -306,14 +314,17 @@ def parse_iso(s):
 
 
 def test_interval(series_by_channel, test_started_at, submitted_at):
-    """测试时间区间（绝对时间）=(test_started_at, start + 各通道采样最大跨度)。
+    """测试时间区间（绝对时间）。
 
-    起点缺省时退回提交时间。返回 (start_dt, end_dt, span_s)，无法确定返回 None。
+    起点 = test_started_at（缺省退回提交时间）；
+    终点 = 起点 + 所有通道**最大样本时标**（时标是相对测试起点的秒数，
+    非零起始时标必须按最大时标计，不能用 max−min 跨度把起始偏移吞掉）。
+    返回 (start_dt, end_dt, max_t)，无法确定起点时返回 None。
     """
     start = parse_iso(test_started_at) or parse_iso(submitted_at)
     if start is None:
         return None
-    span = 0.0
+    max_t = 0.0
     for ch, data in series_by_channel.items():
         if not data:
             continue
@@ -322,8 +333,8 @@ def test_interval(series_by_channel, test_started_at, submitted_at):
             continue
         ts = [float(p[0]) for p in pts]
         if ts:
-            span = max(span, max(ts) - min(ts))
-    return start, start + _timedelta(span), span
+            max_t = max(max_t, max(ts))
+    return start, start + _timedelta(max_t), max_t
 
 
 def _timedelta(seconds):
@@ -644,7 +655,7 @@ def apply_chain(db, *, test_kind, series, bindings, test_started_at,
         "test_kind": test_kind,
         "test_interval": ([interval[0].isoformat(), interval[1].isoformat()]
                           if interval else None),
-        "test_span_s": round(interval[2], 6) if interval else None,
+        "test_max_t_s": round(interval[2], 6) if interval else None,
         "legacy_calibration_valid_until": None,
         "channels": channels_out,
         "rejections": rejections,
@@ -661,7 +672,7 @@ def _legacy_block(present, interval):
         "mode": "legacy",
         "test_interval": ([interval[0].isoformat(), interval[1].isoformat()]
                           if interval else None),
-        "test_span_s": round(interval[2], 6) if interval else None,
+        "test_max_t_s": round(interval[2], 6) if interval else None,
         "channels": [{"channel": ch, "status": "legacy",
                       "rejection_code": None} for ch in present],
         "rejections": [], "accepted": True,
