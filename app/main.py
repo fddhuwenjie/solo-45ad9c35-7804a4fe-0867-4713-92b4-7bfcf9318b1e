@@ -13,6 +13,7 @@ from .failsafe import failsafe_analysis, failsafe_report, trend as fs_trend
 from .flowcurve import compare as fc_compare, fc_analysis, fc_report
 from .fullstroke import analysis, pairing, report
 from .limitswitch import compare as ls_compare, ls_analysis, ls_report
+from .partialstroke import compare as ps_compare
 from .seatleak import compare as sl_compare, seat_analysis, seat_report
 from .thrustsignature import (
     compare as ts_compare, thrust_analysis, thrust_report)
@@ -803,6 +804,46 @@ def create_app(db_path=DEFAULT_DB):
         t = db.get_limitswitch_test(a["ls_test_id"])
         valve = db.get_valve(t["valve_id"])
         return ls_report.render_ls_report(a, t, valve)
+
+    # ===================== 在线部分行程测试（PST） =====================
+
+    @app.post("/partialstroke/tests", status_code=201)
+    def submit_pst_test(body: schemas.PSTestSubmission, db=Depends(get_db)):
+        valve = db.get_valve_by_tag(body.valve_tag)
+        if valve is None:
+            vid = db.create_valve(body.valve_tag, body.valve_description)
+            valve = db.get_valve(vid)
+        payload = body.model_dump()
+        pst_test_id = db.create_pst_test(
+            valve_id=valve["id"],
+            phase=body.phase,
+            test_started_at=body.test_started_at,
+            trim=body.trim,
+            range_min=body.range.min,
+            range_max=body.range.max,
+            range_unit=body.range.unit,
+            spec=body.spec.model_dump(),
+            conditions=body.conditions.model_dump(),
+            thresholds=body.thresholds.model_dump(),
+            calibration_valid_until=body.calibration_valid_until,
+            payload=payload,
+        )
+        return {"pst_test_id": pst_test_id, "valve_id": valve["id"]}
+
+    @app.post("/partialstroke/comparisons", status_code=201)
+    def create_pst_comparison(body: schemas.PSCompareRequest, db=Depends(get_db)):
+        try:
+            if body.analysis_ids:
+                result = ps_compare.compare_pst_tests(
+                    db, analysis_ids=body.analysis_ids)
+            else:
+                if not body.valve_tag:
+                    raise HTTPException(422, "未指定 analysis_ids 时必须提供 valve_tag")
+                result = ps_compare.compare_pst_tests(db, valve_tag=body.valve_tag)
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+        cid = db.create_pst_comparison(result.get("valve_id"), result)
+        return {"comparison_id": cid, **result}
 
     # ---- 请求样例 ----
     @app.get("/samples")
