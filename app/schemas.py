@@ -776,3 +776,117 @@ class LSAdjustRequest(BaseModel):
 class LSCompareRequest(BaseModel):
     analysis_ids: list[int] = []
     valve_tag: Optional[str] = None
+
+
+# ===================== 在线部分行程测试（PST） =====================
+
+PSTDirection = Literal["open", "close"]
+PVMeasurementType = Literal["pressure", "temperature", "flow_liquid", "flow_gas"]
+
+
+class PSTSpec(BaseModel):
+    """部分行程测试冻结规格：提交即冻结，是比较兼容性的判定依据。"""
+    start_pct: float = Field(
+        ..., ge=0.0, le=100.0, description="冻结起点：测试开始时的期望阀位（量程 %）")
+    direction: PSTDirection = Field(
+        ..., description="动作方向：open=向开方向试动，close=向关方向试动")
+    target_travel_pct: float = Field(
+        ..., gt=0.0, le=100.0, description="目标行程（量程 %，相对起点的位移）")
+    max_disturbance_pct: float = Field(
+        ..., gt=0.0, le=100.0,
+        description="最大扰动：工艺允许的阀位相对起点的最大偏移（量程 %），越过即行程越限")
+    time_limit_s: float = Field(
+        ..., gt=0.0, description="时限：指令阶跃到返回原位的允许总时长 s")
+
+    @field_validator("target_travel_pct")
+    @classmethod
+    def _check_target_within_disturbance(cls, v, info):
+        md = info.data.get("max_disturbance_pct")
+        if md is not None and v > md:
+            raise ValueError("目标行程不得大于最大扰动限值")
+        return v
+
+
+class PSTSeriesSet(BaseModel):
+    permit: SeriesData = Field(..., description="测试许可接点（0/1，1=许可有效；单位 bool/di）")
+    abort: SeriesData = Field(..., description="中止接点（0/1，1=请求中止；单位 bool/di）")
+    command: SeriesData = Field(..., description="阀位指令")
+    position: SeriesData = Field(..., description="阀位反馈")
+    pressure: SeriesData = Field(..., description="执行器压力")
+    pv: SeriesData = Field(..., description="过程变量（如流量，单位任意，越界判定用）")
+
+
+class PSThresholds(BaseModel):
+    breakaway_delay_s_max: float = Field(5.0, description="起步延迟上限 s（指令阶跃到阀位起步）")
+    move_detect_pct: float = Field(0.5, description="起步判定：阀位持续偏离基线的位移 %")
+    move_sustained_s: float = Field(0.3, description="起步判定持续时间 s")
+    cmd_step_detect_pct: float = Field(2.0, description="指令阶跃检测：指令相对基线的变化 %")
+    travel_reach_tol_pct: float = Field(0.5, description="目标行程到达容差 %（有效行程 ≥ 目标−容差）")
+    overshoot_pct_max: float = Field(2.0, description="超调上限 %（越过目标行程的部分）")
+    speed_min_pct_s: float = Field(0.5, description="动作段平均速度下限 %/s")
+    hold_drift_pct_max: float = Field(1.0, description="保持段阀位峰峰漂移上限 %")
+    return_time_s_max: float = Field(10.0, description="返回时间上限 s（指令复位到回位稳定）")
+    residual_pct_max: float = Field(1.0, description="残余偏差上限 %（回位后与起点基线之差）")
+    settle_band_pct: float = Field(1.0, description="回到原位判定带 %（相对起点基线）")
+    settle_dwell_s: float = Field(1.0, description="回位判定：进入判定带后须连续保持的最短时间 s")
+    baseline_min_s: float = Field(2.0, description="指令阶跃前要求的最短基线时长 s")
+    baseline_coverage_min: float = Field(0.8, description="基线区间要求的采样覆盖率")
+    pv_min: Optional[float] = Field(None, description="过程变量允许下限（PV 原生单位），缺省不判")
+    pv_max: Optional[float] = Field(None, description="过程变量允许上限（PV 原生单位），缺省不判")
+    abort_response_s: float = Field(2.0, description="中止后期望阀位开始回返的响应时间 s")
+    abort_move_pct: float = Field(1.0, description="中止响应时间后阀位继续外移超过该值判接点矛盾 %")
+
+
+class PSConditions(BaseModel):
+    load: str = Field("online", description="负载条件，部分行程测试通常为 online")
+    medium: str = "process"
+    note: str = ""
+
+
+class PSTestSubmission(BaseModel):
+    valve_tag: str
+    valve_description: str = ""
+    phase: Literal["pre", "post", "standalone", "baseline", "periodic"] = "standalone"
+    test_started_at: Optional[str] = None
+    range: RangeSpec = RangeSpec()
+    trim: str = Field(..., min_length=1, description="阀内件标识/图号（比较兼容性冻结项）")
+    spec: PSTSpec = Field(..., description="冻结测试规格：起点/方向/目标行程/最大扰动/时限")
+    series: PSTSeriesSet
+    pv_measurement_type: PVMeasurementType = Field(
+        "flow_liquid", description="过程变量通道的测量类型（逐通道校准链绑定证书用）")
+    conditions: PSConditions = PSConditions()
+    thresholds: PSThresholds = PSThresholds()
+    calibration_valid_until: Optional[str] = None
+    calibration_bindings: Optional[dict[str, int]] = Field(
+        None, description="逐通道校准版本绑定 {通道: 校准版本id}；提供后进入逐通道链模式，"
+                          "本测试的测量通道（command/position/pressure/pv）都必须绑定有效版本。"
+                          "旧字段 calibration_valid_until 在未提供绑定时继续生效")
+
+
+class PSPhaseMove(BaseModel):
+    """人工移动阶段边界（许可/动作/保持/返回），必须填写理由。"""
+    phase: Literal["permit", "action", "hold", "return"]
+    boundary: Literal["start", "end"]
+    new_time: float = Field(..., description="新边界时刻（与采样同一时间轴，秒）")
+    reason: str = Field(..., min_length=1, description="移动理由（必填）")
+
+
+class PSExclusion(BaseModel):
+    channel: Literal["permit", "abort", "command", "position", "pressure", "pv"]
+    start_index: int = Field(..., description="原始提交序列中的起始点序号（含）")
+    end_index: int = Field(..., description="原始提交序列中的结束点序号（含）")
+    reason: str = Field(..., min_length=1, description="剔除理由（必填）")
+
+
+class PSAdjustRequest(BaseModel):
+    author: str
+    phase_moves: list[PSPhaseMove] = []
+    exclusions: list[PSExclusion] = []
+    calibration_bindings: Optional[dict[str, int]] = Field(
+        None, description="可选：改绑逐通道校准版本（派生新版本；旧分析不变）；空对象 {} 回到 legacy")
+    note: str = ""
+
+
+class PSCompareRequest(BaseModel):
+    analysis_ids: list[int] = []
+    valve_tag: Optional[str] = None

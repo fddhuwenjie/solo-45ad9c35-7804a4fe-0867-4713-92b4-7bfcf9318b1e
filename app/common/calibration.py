@@ -78,7 +78,8 @@ CHANNEL_MEASUREMENT_TYPE = {
     "temperature": "temperature", "flow": "flow_liquid",
 }
 # "flow" 同时出现在阀座（气体）与流量曲线（液体）：由测试模块显式传入
-# measurement_type 覆盖。
+# measurement_type 覆盖。部分行程测试的过程变量通道 "pv" 量纲随工艺而变，
+# 由测试提交显式声明（measurement_types 覆盖），不在本表固化。
 
 # 拒绝原因代码
 REJECT_NOT_BOUND = "calibration_not_bound"
@@ -112,6 +113,8 @@ TEST_CHANNELS = {
                   "downstream_pressure", "temperature"),
     # 限位开关（open/closed 为离散接点，不是测量通道）
     "limitswitch": ("position",),
+    # 部分行程（permit/abort 为离散接点，不是测量通道；pv 量纲由提交声明）
+    "partialstroke": ("command", "position", "pressure", "pv"),
 }
 
 
@@ -457,10 +460,13 @@ def _present_channels(series, test_kind, flow_measurement_type=None):
 
 def apply_chain(db, *, test_kind, series, bindings, test_started_at,
                 submitted_at, range_min=None, range_max=None,
-                flow_measurement_type=None):
+                flow_measurement_type=None, measurement_types=None):
     """对每路时序执行校准链。
 
     bindings: {channel: calibration_version_id}（dict 或 None）。
+    measurement_types: 可选的逐通道测量类型覆盖（如部分行程测试的
+    {"pv": "flow_liquid"}），优先级高于 CHANNEL_MEASUREMENT_TYPE 与
+    flow_measurement_type。
     返回 (corrected_series, chain_block)：
     - corrected_series: {channel: {"unit": 通道原单位, "points": [[t, 修正值], ...]}}，
       被拒绝通道保留原始读数以便诊断展示，但下游单位统一应跳过；
@@ -477,8 +483,12 @@ def apply_chain(db, *, test_kind, series, bindings, test_started_at,
     channels_out, rejections, calibration_components = [], [], []
     corrected = {}
     for ch in present:
-        mt = flow_measurement_type if ch == "flow" and flow_measurement_type \
-            else CHANNEL_MEASUREMENT_TYPE.get(ch)
+        if measurement_types and ch in measurement_types:
+            mt = measurement_types[ch]
+        elif ch == "flow" and flow_measurement_type:
+            mt = flow_measurement_type
+        else:
+            mt = CHANNEL_MEASUREMENT_TYPE.get(ch)
         data = series[ch]
         raw_points = [[float(t), float(v)] for t, v in
                       ((p[0], p[1]) for p in data["points"])]
