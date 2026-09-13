@@ -82,20 +82,27 @@ def _raw_interval(channel, points, i_lo, i_hi):
 
 
 def _active_at(intervals, t):
-    """t 是否落在某个有效区间内（含释放沿之前）。"""
+    """t 是否落在某个有效区间内（含释放沿/有效延伸终点之前）。"""
     for iv in intervals:
-        end = iv["release_t"] if iv["release_t"] is not None else float("inf")
+        au = iv.get("active_until")
+        end = au if au is not None else float("inf")
         if iv["t_start"] - 1e-9 <= t < end:
             return True
     return False
 
 
 def _pair_delay(t_edge, entries):
-    """边沿相对最近一次进窗的延迟；边沿早于进窗（提前翻转）时为负值。"""
-    before = [e for e in entries if e["t"] <= t_edge + 1e-9]
+    """边沿相对合格进窗记录的延迟（负值为提前翻转）。
+
+    仅配对运动方向相符（direction_ok=True）的进窗记录；反向穿越、
+    记录起点已在窗内（方向未知）的记录不参与配对。找不到合格记录时
+    保持未配对，返回 None，不计算延迟。
+    """
+    qualified = [e for e in entries if e.get("direction_ok") is True]
+    before = [e for e in qualified if e["t"] <= t_edge + 1e-9]
     if before:
         return round(t_edge - before[-1]["t"], 6)
-    after = [e for e in entries if e["t"] > t_edge + 1e-9]
+    after = [e for e in qualified if e["t"] > t_edge + 1e-9]
     if after:
         return round(t_edge - after[0]["t"], 6)
     return None
@@ -267,7 +274,8 @@ def run_limitswitch_analysis(db, ls_test_id, author="auto", new_adjustments=None
 
         kept = []
         for iv in got["adopted_intervals"]:
-            end = iv["release_t"] if iv["release_t"] is not None else iv["t_end"]
+            end = iv["active_until"] if iv["active_until"] is not None \
+                else iv["t_end"]
             if _hit(iv["t_start"], end):
                 ignored.append({"kind": "interval", "t_start": iv["t_start"],
                                 "t_end": end})
@@ -353,7 +361,11 @@ def run_limitswitch_analysis(db, ls_test_id, author="auto", new_adjustments=None
             "low" if end == "high" else "high") if pos_pct else []
 
         for iv in got["adopted_intervals"]:
-            pair = [("actuate", iv["t_start"], iv["i_start"], act_win, act_entries)]
+            pair = []
+            # 记录起点已有效的区间：动作沿落在记录之外，不生成动作边沿
+            if iv["i_start"] > 0:
+                pair.append(("actuate", iv["t_start"], iv["i_start"],
+                             act_win, act_entries))
             if iv["release_t"] is not None:
                 pair.append(("release", iv["release_t"], iv["release_i"],
                              rel_win, rel_entries))
@@ -440,9 +452,11 @@ def run_limitswitch_analysis(db, ls_test_id, author="auto", new_adjustments=None
         o_ch, _, _, o_pts, _ = raw_bits.get("open", ("open", [], [], [], None))
         c_ch, _, _, c_pts, _ = raw_bits.get("closed", ("closed", [], [], [], None))
         for a in o_iv:
-            a_end = a["release_t"] if a["release_t"] is not None else float("inf")
+            a_end = a["active_until"] if a["active_until"] is not None \
+                else float("inf")
             for b in c_iv:
-                b_end = b["release_t"] if b["release_t"] is not None else float("inf")
+                b_end = b["active_until"] if b["active_until"] is not None \
+                    else float("inf")
                 lo = max(a["t_start"], b["t_start"])
                 hi = min(a_end, b_end)
                 if hi - lo > max_overlap_s + 1e-9:

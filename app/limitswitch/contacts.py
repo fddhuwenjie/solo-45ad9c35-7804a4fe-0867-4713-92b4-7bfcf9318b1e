@@ -102,8 +102,12 @@ def extract_intervals(ts, bits, debounce_s):
 
     返回 (adopted, glitches, chatters)：
     - adopted：有效区间 [{t_start, t_end, i_start, i_end, n_runs,
-      release_t, release_i, release_observed}]，release_t 为区间后首个
-      非有效样本时刻（区间延伸到记录末尾时为 None）；
+      release_t, release_i, release_observed, active_until}]。
+      release_t 为区间后首个有效 0 样本时刻（释放沿）；区间延伸到记录
+      末尾、或其后紧邻样本为非法状态（None）时为 None——非法样本不得
+      结束有效边沿，该区间不产生释放沿。active_until 为有效状态保守
+      延伸的终点（其后首个有效样本时刻，无则 None 表示至记录末），
+      仅供互斥/次序判定的状态查询，不生成边沿；
     - glitches：孤立短脉冲（持续 < 去抖时长），不采用为边沿；
     - chatters：簇内含多段的抖动（含毛刺簇），只留痕不影响采用。
     """
@@ -136,9 +140,16 @@ def extract_intervals(ts, bits, debounce_s):
         t0, t1 = ts[i0], ts[i1]
         n_runs = len(cl)
         if n_runs > 1:
+            # 抖动区间止于首个长稳态段（持续 ≥ 去抖时长）的起点：
+            # 抖动是过渡期的反复弹跳，其后稳定有效的长段不属于抖动
+            bounce_i1 = i1
+            for a, b in cl:
+                if ts[b] - ts[a] >= debounce_s - 1e-9:
+                    bounce_i1 = a
+                    break
             chatters.append({
-                "t_start": round(t0, 6), "t_end": round(t1, 6),
-                "i_start": i0, "i_end": i1, "n_pulses": n_runs,
+                "t_start": round(t0, 6), "t_end": round(ts[bounce_i1], 6),
+                "i_start": i0, "i_end": bounce_i1, "n_pulses": n_runs,
                 "pulse_times": [round(ts[a], 6) for a, _ in cl],
             })
         duration = t1 - t0
@@ -148,13 +159,34 @@ def extract_intervals(ts, bits, debounce_s):
                 "i_start": i0, "i_end": i1, "duration_s": round(duration, 6),
             })
             continue
+        # 释放沿仅当区间后紧邻样本为有效 0 时才可定位；非法（None）样本
+        # 不得生成或结束有效边沿——此时释放时刻不可定位（release_t=None，
+        # 不进入指标计算），有效状态保守延伸到其后首个有效样本（active_until）。
         j = i1 + 1
+        release_t = release_i = None
+        release_observed = False
+        active_until = float("inf")
+        if j < n:
+            if bits[j] == 0:
+                release_t, release_i = round(ts[j], 6), j
+                release_observed = True
+                active_until = ts[j]
+            elif bits[j] is None:
+                k = j
+                while k < n and bits[k] is None:
+                    k += 1
+                if k < n:
+                    active_until = ts[k]
+            else:
+                active_until = ts[j]
         rec = {
             "t_start": round(t0, 6), "t_end": round(t1, 6),
             "i_start": i0, "i_end": i1, "n_runs": n_runs,
-            "release_t": round(ts[j], 6) if j < n else None,
-            "release_i": j if j < n else None,
-            "release_observed": bool(j < n and bits[j] == 0),
+            "release_t": release_t,
+            "release_i": release_i,
+            "release_observed": release_observed,
+            "active_until": (round(active_until, 6)
+                             if active_until != float("inf") else None),
         }
         adopted.append(rec)
     return adopted, glitches, chatters
