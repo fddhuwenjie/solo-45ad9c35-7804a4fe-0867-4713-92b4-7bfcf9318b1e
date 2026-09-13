@@ -176,16 +176,24 @@ def normalize_scheme(payload):
     model["events"] = events
 
     # ---- 动作 ----
+    air_chambers = list(act.get("air_chambers") or [])
     model["actions"] = []
     for a in payload["actions"]:
         req = _norm_pressure(a["required_supply_pressure_min"],
                              f"actions[{a['name']}].required_supply_pressure_min",
                              gaps, notes)
+        driven = "a" if a["direction"] == "open" else "b"
+        # 失气安全行程的驱动腔不是供气腔时，由弹簧驱动（供气腔放空）；
+        # 否则由储气罐/供气链驱动该腔。
+        spring_driven = (a["kind"] == "fail_safe_stroke"
+                         and driven not in air_chambers)
+        chamber = air_chambers[0] if spring_driven else driven
         model["actions"].append({
             "name": a["name"], "kind": a["kind"], "direction": a["direction"],
             "t_start": float(a["t_start_s"]), "travel_max": float(a["travel_time_s_max"]),
             "p_req_min": req if req is not None else 0.0,
             "band": float(a["safe_band_pct"]),
+            "spring_driven": spring_driven, "chamber": chamber,
         })
 
     if any(g["code"] == _GAP_UNIT for g in gaps):
@@ -262,13 +270,16 @@ def _build_action_results(model, sim):
 
         # 安全位未到达（仅失气安全行程）
         if a["kind"] == "fail_safe_stroke":
+            cause = ("弹簧驱动力不足或排气不畅（弹簧驱动失气行程）"
+                     if a.get("spring_driven") else
+                     "储气罐存量不足以走完全行程")
             if not tr["reached"]:
                 dev, active_devs = _first_device(model["events"], t0, t_end)
                 findings.append({
                     "kind": "safe_position_not_reached",
                     "detail": f"失气后未到达安全位（终位 "
                               f"{tr['final_x'] if tr['final_x'] is not None else '—'}%，"
-                              f"判定带 ±{a['band']:g}%），储气罐存量不足以走完全行程",
+                              f"判定带 ±{a['band']:g}%），{cause}",
                     "interval_s": [round(t0, 3), round(t_end, 3)],
                     "first_device": dev, "active_devices": active_devs,
                 })
@@ -304,6 +315,7 @@ def _build_action_results(model, sim):
                 "basis": "失气后到达安全位判定带并保持至动作结束"})
         out.append({
             "name": a["name"], "kind": a["kind"], "direction": a["direction"],
+            "spring_driven": a.get("spring_driven", False),
             "t_start_s": round(t0, 3), "t_end_s": round(t_end, 3),
             "target_pct": 100.0 if a["direction"] == "open" else 0.0,
             "safe_band_pct": a["band"],

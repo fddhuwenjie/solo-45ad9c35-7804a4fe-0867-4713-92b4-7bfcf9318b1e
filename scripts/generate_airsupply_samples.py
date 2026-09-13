@@ -94,7 +94,8 @@ def as_undersized():
         {"name": "branch", "length_m": 80.0, "inner_diameter_mm": 6.0,
          "friction_factor": 0.03, "minor_loss_k": 0.0},
     ]
-    s["regulator"]["flow_curve"] = [[10.0, 40.0], [25.0, 80.0], [50.0, 120.0]]
+    s["regulator"]["flow_curve"] = [[10.0, 40.0], [25.0, 80.0], [50.0, 120.0],
+                                    [100.0, 150.0], [200.0, 170.0]]
     s["tank"]["volume"] = {"value": 5.0, "unit": "l"}
     s["actuator"]["port_conductance"] = {"value": 0.5, "unit": "nl/min/kpa"}
     s["events"] = [

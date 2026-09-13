@@ -25,6 +25,7 @@ P_ATM_KPA = 101.325       # 大气压
 P_REF_KPA = 101.325       # 标准状态压力
 T_REF_K = 288.15          # 标准状态温度（15 °C）
 R_AIR = 287.05            # 空气气体常数 J/(kg·K)
+_EPS = 1e-9               # 收敛判定的零值保护（容差本身始终生效）
 
 
 def _interp(points, x):
@@ -129,19 +130,31 @@ def _g_req(model, chamber, direction, x_pct):
         * _chamber_vol(model, chamber, x_pct)
 
 
-def _walk(model, chamber, direction, inv_c, x0, x1, advance):
+def _g_hold(model, chamber, x_pct):
+    """弹簧驱动失气行程：保持阀位所需气腔背压对应的气体存量（kPa·m³）。
+
+    弹簧力始终指向故障安全位，负载/摩擦阻碍安全行程；气腔（供气腔）内的
+    残余背压对抗弹簧。净弹簧力不足时背压需求为零（阀位由弹簧保持）。
+    """
+    f_spring = _interp(model["spring"], x_pct) if model["spring"] else 0.0
+    f_net = f_spring - model["load_n"] - model["friction_n"]
+    p_hold = max(f_net / model["areas"][chamber] / 1000.0, 0.0)
+    return (p_hold + P_ATM_KPA) * _chamber_vol(model, chamber, x_pct)
+
+
+def _walk(g_fn, inv_c, x0, x1, advance):
     """从 x0 向 x1 拟静态行走，返回能到达的最远位置。
 
     advance=True：条件 g(x) ≤ inv_c 成立才能前进，遇到 g > inv_c 停止；
-    advance=False（回退）：条件 g(x) > inv_c 才继续回退，遇到 g ≤ inv_c 停止。
-    8 等分粗扫定位穿越点后二分 24 次。
+    advance=False（回退/弹簧驱动）：条件 g(x) > inv_c 才继续前进，
+    遇到 g ≤ inv_c 停止。8 等分粗扫定位穿越点后二分 24 次。
     """
     eps = 1e-12
     if x1 == x0:
         return x0
 
     def _ok(xx):
-        g = _g_req(model, chamber, direction, xx)
+        g = g_fn(xx)
         return (g <= inv_c + eps) if advance else (g > inv_c + eps)
 
     prev = x0
@@ -162,17 +175,37 @@ def _walk(model, chamber, direction, inv_c, x0, x1, advance):
 
 def _place_valve(model, chamber, direction, inv_c, x_pct, dt):
     """拟静态安置阀位：前进受限于存气量与最大速率；存量不足时回退。"""
+    g_fn = lambda xx: _g_req(model, chamber, direction, xx)
     s = 1.0 if direction == "open" else -1.0
     x_target = 100.0 if direction == "open" else 0.0
     max_dx = model["max_rate"] * dt
-    if _g_req(model, chamber, direction, x_pct) <= inv_c + 1e-12:
+    if g_fn(x_pct) <= inv_c + 1e-12:
         x_cand = x_pct + s * max_dx
         x_cand = min(max(x_cand, 0.0), 100.0)
         x_cand = min(x_cand, x_target) if s > 0 else max(x_cand, x_target)
-        return _walk(model, chamber, direction, inv_c, x_pct, x_cand, True)
+        return _walk(g_fn, inv_c, x_pct, x_cand, True)
     x_cand = x_pct - s * max_dx
     x_cand = min(max(x_cand, 0.0), 100.0)
-    return _walk(model, chamber, direction, inv_c, x_pct, x_cand, False)
+    return _walk(g_fn, inv_c, x_pct, x_cand, False)
+
+
+def _place_valve_spring_driven(model, chamber, direction, inv_c, x_pct, dt):
+    """弹簧驱动失气行程的拟静态安置。
+
+    供气腔经腔口向大气放空，存量下降；当保持当前阀位所需存量
+    （弹簧净力对应背压 × 腔容积）高于实际存量时，阀位向安全位移动。
+    只向安全位行走（失气期间不建模反向漂移），速率受 max_rate 限制。
+    """
+    g_fn = lambda xx: _g_hold(model, chamber, xx)
+    s = 1.0 if direction == "open" else -1.0
+    x_target = 100.0 if direction == "open" else 0.0
+    max_dx = model["max_rate"] * dt
+    if g_fn(x_pct) > inv_c + 1e-12:
+        x_cand = x_pct + s * max_dx
+        x_cand = min(max(x_cand, 0.0), 100.0)
+        x_cand = min(x_cand, x_target) if s > 0 else max(x_cand, x_target)
+        return _walk(g_fn, inv_c, x_pct, x_cand, False)
+    return x_pct
 
 
 def simulate(model, dt):
@@ -228,7 +261,7 @@ def simulate(model, dt):
                     tr["_below_start"] = None
             cur = nxt
             a = actions[cur]
-            driven = "a" if a["direction"] == "open" else "b"
+            driven = a["chamber"]
             other = "b" if driven == "a" else "a"
             inv[other] = P_ATM_KPA * _chamber_vol(model, other, x)
             vented[other] = True
@@ -238,6 +271,7 @@ def simulate(model, dt):
 
         active = cur >= 0
         chamber = driven if active else None
+        spring_driven = active and actions[cur].get("spring_driven")
 
         # ---- 瞬时耗气：并发事件（失气后停供） ----
         q_events = 0.0 if supply_lost else sum(
@@ -249,14 +283,22 @@ def simulate(model, dt):
         if not supply_lost and p_tank < model["p_set"]:
             totals["max_reg_dp_kpa"] = max(totals["max_reg_dp_kpa"], dp_demanded)
 
-        # ---- 腔口流量（母管 ↔ 被驱动腔） ----
-        if active:
+        # ---- 腔口流量 ----
+        if spring_driven:
+            # 弹簧驱动失气行程：供气腔经腔口向大气放空，储气罐被单向阀隔离
+            p_ch = inv[chamber] / _chamber_vol(model, chamber, x) - P_ATM_KPA
+            q_port = model["port_g"] * max(p_ch, 0.0)  # 放空流量（出腔为正）
+            q_port = -q_port  # 符号约定：入腔为正
+            q_reg_eff = 0.0
+        elif active:
             p_ch = inv[chamber] / _chamber_vol(model, chamber, x) - P_ATM_KPA
             q_port = model["port_g"] * (p_tank - p_ch)
+            q_reg_eff = q_reg
         else:
             q_port = 0.0
+            q_reg_eff = q_reg
         if q_port > 0.0:  # 罐存量约束
-            avail = q_reg + p_tank * model["tank_v"] * 60.0 / (k_nl * dt)
+            avail = q_reg_eff + p_tank * model["tank_v"] * 60.0 / (k_nl * dt)
             q_port = max(min(q_port, avail), 0.0)
         elif q_port < 0.0:  # 腔存量不得破真空
             min_inv = P_ATM_KPA * _chamber_vol(model, chamber, x)
@@ -264,12 +306,18 @@ def simulate(model, dt):
             q_port = -max(min(-q_port, out_max), 0.0)
 
         # ---- 罐压与腔存量更新 ----
-        p_tank = max(p_tank + (q_reg - q_port) / 60.0 * k_nl / model["tank_v"] * dt,
-                     0.0)
+        if not spring_driven:
+            p_tank = max(p_tank + (q_reg_eff - q_port) / 60.0 * k_nl
+                         / model["tank_v"] * dt, 0.0)
         if active:
             inv[chamber] += q_port / 60.0 * k_nl * dt
-            x = _place_valve(model, chamber, actions[cur]["direction"],
-                             inv[chamber], x, dt)
+            if spring_driven:
+                x = _place_valve_spring_driven(
+                    model, chamber, actions[cur]["direction"],
+                    inv[chamber], x, dt)
+            else:
+                x = _place_valve(model, chamber, actions[cur]["direction"],
+                                 inv[chamber], x, dt)
             other = "b" if chamber == "a" else "a"
             if vented[other]:
                 inv[other] = P_ATM_KPA * _chamber_vol(model, other, x)
@@ -351,7 +399,7 @@ def solve(model):
                                     "coarse": a["reached"], "fine": b["reached"]})
         if a["reached"] and b["reached"]:
             d = abs(a["t_reached"] - b["t_reached"])
-            lim = max(tol * b["t_reached"], 2.0 * dt)
+            lim = max(tol * b["t_reached"], _EPS)
             ok = d <= lim + 1e-12
             converged = converged and ok
             rel = d / max(b["t_reached"], 1e-9)
@@ -361,7 +409,7 @@ def solve(model):
                                     "abs_diff": round(d, 6), "limit": round(lim, 6)})
         else:
             d = abs((a["final_x"] or 0.0) - (b["final_x"] or 0.0))
-            lim = max(tol * 100.0, 1.0)
+            lim = max(tol * 100.0, _EPS)
             ok = d <= lim + 1e-12
             converged = converged and ok
             max_rel = max(max_rel, d / 100.0)
@@ -369,7 +417,7 @@ def solve(model):
                                     "coarse": a["final_x"], "fine": b["final_x"],
                                     "abs_diff": round(d, 6), "limit": round(lim, 6)})
         d = abs((a["min_p"] or 0.0) - (b["min_p"] or 0.0))
-        lim = max(tol * (b["min_p"] or 0.0), 1.0)
+        lim = max(tol * (b["min_p"] or 0.0), _EPS)
         ok = d <= lim + 1e-12
         converged = converged and ok
         max_rel = max(max_rel, d / max(b["min_p"] or 0.0, 1e-9))

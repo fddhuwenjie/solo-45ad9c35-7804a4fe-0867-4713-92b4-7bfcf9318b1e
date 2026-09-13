@@ -1071,8 +1071,11 @@ class ASSchemeCreate(BaseModel):
     @field_validator("actuator")
     @classmethod
     def _check_actuator(cls, act):
-        if act.actuator_type == "spring_return" and len(act.air_chambers) != 1:
-            raise ValueError("spring_return 执行器须且只须一个供气驱动腔")
+        if act.actuator_type == "spring_return":
+            if len(act.air_chambers) != 1:
+                raise ValueError("spring_return 执行器须且只须一个供气驱动腔")
+            if act.spring is None:
+                raise ValueError("spring_return 执行器必须提供弹簧曲线")
         return act
 
     @field_validator("actions")
@@ -1083,16 +1086,20 @@ class ASSchemeCreate(BaseModel):
             return acts
         for a in acts:
             driven = "a" if a.direction == "open" else "b"
-            if driven not in act.air_chambers:
-                raise ValueError(
-                    f"动作 {a.name!r} 的驱动腔 {driven.upper()} 不是供气驱动腔"
-                    "（该方向为弹簧驱动，供气瞬态核算不适用）")
             if a.kind == "fail_safe_stroke":
                 want = "close" if act.fail_mode == "fail_close" else "open"
                 if a.direction != want:
                     raise ValueError(
                         f"动作 {a.name!r}：失气安全行程方向须指向故障安全位"
                         f"（fail_mode={act.fail_mode} → {want}）")
+                if driven not in act.air_chambers and act.spring is None:
+                    raise ValueError(
+                        f"动作 {a.name!r} 的失气安全行程由弹簧驱动"
+                        "（驱动腔非供气腔），但未提供弹簧曲线")
+            elif driven not in act.air_chambers:
+                raise ValueError(
+                    f"动作 {a.name!r} 的驱动腔 {driven.upper()} 不是供气驱动腔"
+                    "（该方向为弹簧驱动，供气瞬态核算不适用）")
         return acts
 
 
