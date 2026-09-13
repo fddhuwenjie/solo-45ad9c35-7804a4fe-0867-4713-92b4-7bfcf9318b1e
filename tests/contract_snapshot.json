@@ -1,0 +1,489 @@
+{
+  "title": "调节阀全行程诊断服务",
+  "version": "1.0.0",
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/analyses/{analysis_id}",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "get_analysis_analyses__analysis_id__get"
+    },
+    {
+      "method": "POST",
+      "path": "/analyses/{analysis_id}/adjust",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "adjust_analyses__analysis_id__adjust_post"
+    },
+    {
+      "method": "GET",
+      "path": "/analyses/{analysis_id}/export",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "export_json_analyses__analysis_id__export_get"
+    },
+    {
+      "method": "GET",
+      "path": "/analyses/{analysis_id}/report",
+      "status": 200,
+      "media_type": "text/html",
+      "operation_id": "html_report_analyses__analysis_id__report_get"
+    },
+    {
+      "method": "GET",
+      "path": "/calibration-versions",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "list_calibration_versions_calibration_versions_get"
+    },
+    {
+      "method": "POST",
+      "path": "/calibration-versions",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "create_calibration_version_calibration_versions_post"
+    },
+    {
+      "method": "GET",
+      "path": "/calibration-versions/{version_id}",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "get_calibration_version_calibration_versions__version_id__get"
+    },
+    {
+      "method": "GET",
+      "path": "/failsafe/analyses/{analysis_id}",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "get_failsafe_analysis_failsafe_analyses__analysis_id__get"
+    },
+    {
+      "method": "POST",
+      "path": "/failsafe/analyses/{analysis_id}/adjust",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "adjust_failsafe_failsafe_analyses__analysis_id__adjust_post"
+    },
+    {
+      "method": "GET",
+      "path": "/failsafe/analyses/{analysis_id}/export",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "export_failsafe_json_failsafe_analyses__analysis_id__export_get"
+    },
+    {
+      "method": "GET",
+      "path": "/failsafe/analyses/{analysis_id}/report",
+      "status": 200,
+      "media_type": "text/html",
+      "operation_id": "fs_html_report_failsafe_analyses__analysis_id__report_get"
+    },
+    {
+      "method": "POST",
+      "path": "/failsafe/tests",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "submit_failsafe_test_failsafe_tests_post"
+    },
+    {
+      "method": "GET",
+      "path": "/failsafe/tests/{fs_test_id}",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "get_failsafe_test_failsafe_tests__fs_test_id__get"
+    },
+    {
+      "method": "GET",
+      "path": "/failsafe/tests/{fs_test_id}/analyses",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "list_failsafe_analyses_failsafe_tests__fs_test_id__analyses_get"
+    },
+    {
+      "method": "POST",
+      "path": "/failsafe/tests/{fs_test_id}/analyze",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "analyze_failsafe_failsafe_tests__fs_test_id__analyze_post"
+    },
+    {
+      "method": "POST",
+      "path": "/failsafe/trends",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "create_failsafe_trend_failsafe_trends_post"
+    },
+    {
+      "method": "GET",
+      "path": "/failsafe/trends/{trend_id}",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "get_failsafe_trend_failsafe_trends__trend_id__get"
+    },
+    {
+      "method": "GET",
+      "path": "/failsafe/trends/{trend_id}/report",
+      "status": 200,
+      "media_type": "text/html",
+      "operation_id": "fs_trend_report_failsafe_trends__trend_id__report_get"
+    },
+    {
+      "method": "GET",
+      "path": "/flowcurve/analyses/{analysis_id}",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "get_flowcurve_analysis_flowcurve_analyses__analysis_id__get"
+    },
+    {
+      "method": "POST",
+      "path": "/flowcurve/analyses/{analysis_id}/adjust",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "adjust_flowcurve_flowcurve_analyses__analysis_id__adjust_post"
+    },
+    {
+      "method": "GET",
+      "path": "/flowcurve/analyses/{analysis_id}/export",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "export_flowcurve_json_flowcurve_analyses__analysis_id__export_get"
+    },
+    {
+      "method": "GET",
+      "path": "/flowcurve/analyses/{analysis_id}/report",
+      "status": 200,
+      "media_type": "text/html",
+      "operation_id": "flowcurve_html_report_flowcurve_analyses__analysis_id__report_get"
+    },
+    {
+      "method": "POST",
+      "path": "/flowcurve/comparisons",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "create_flowcurve_comparison_flowcurve_comparisons_post"
+    },
+    {
+      "method": "GET",
+      "path": "/flowcurve/comparisons/{comparison_id}",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "get_flowcurve_comparison_flowcurve_comparisons__comparison_id__get"
+    },
+    {
+      "method": "POST",
+      "path": "/flowcurve/tests",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "submit_flowcurve_test_flowcurve_tests_post"
+    },
+    {
+      "method": "GET",
+      "path": "/flowcurve/tests/{fc_test_id}",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "get_flowcurve_test_flowcurve_tests__fc_test_id__get"
+    },
+    {
+      "method": "GET",
+      "path": "/flowcurve/tests/{fc_test_id}/analyses",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "list_flowcurve_analyses_flowcurve_tests__fc_test_id__analyses_get"
+    },
+    {
+      "method": "POST",
+      "path": "/flowcurve/tests/{fc_test_id}/analyze",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "analyze_flowcurve_flowcurve_tests__fc_test_id__analyze_post"
+    },
+    {
+      "method": "GET",
+      "path": "/limitswitch/analyses/{analysis_id}",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "get_limitswitch_analysis_limitswitch_analyses__analysis_id__get"
+    },
+    {
+      "method": "POST",
+      "path": "/limitswitch/analyses/{analysis_id}/adjust",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "adjust_limitswitch_limitswitch_analyses__analysis_id__adjust_post"
+    },
+    {
+      "method": "GET",
+      "path": "/limitswitch/analyses/{analysis_id}/export",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "export_limitswitch_json_limitswitch_analyses__analysis_id__export_get"
+    },
+    {
+      "method": "GET",
+      "path": "/limitswitch/analyses/{analysis_id}/report",
+      "status": 200,
+      "media_type": "text/html",
+      "operation_id": "limitswitch_html_report_limitswitch_analyses__analysis_id__report_get"
+    },
+    {
+      "method": "POST",
+      "path": "/limitswitch/comparisons",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "create_limitswitch_comparison_limitswitch_comparisons_post"
+    },
+    {
+      "method": "GET",
+      "path": "/limitswitch/comparisons/{comparison_id}",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "get_limitswitch_comparison_limitswitch_comparisons__comparison_id__get"
+    },
+    {
+      "method": "POST",
+      "path": "/limitswitch/tests",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "submit_limitswitch_test_limitswitch_tests_post"
+    },
+    {
+      "method": "GET",
+      "path": "/limitswitch/tests/{ls_test_id}",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "get_limitswitch_test_limitswitch_tests__ls_test_id__get"
+    },
+    {
+      "method": "GET",
+      "path": "/limitswitch/tests/{ls_test_id}/analyses",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "list_limitswitch_analyses_limitswitch_tests__ls_test_id__analyses_get"
+    },
+    {
+      "method": "POST",
+      "path": "/limitswitch/tests/{ls_test_id}/analyze",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "analyze_limitswitch_limitswitch_tests__ls_test_id__analyze_post"
+    },
+    {
+      "method": "POST",
+      "path": "/pairings",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "create_pairing_pairings_post"
+    },
+    {
+      "method": "GET",
+      "path": "/pairings/{pairing_id}",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "get_pairing_pairings__pairing_id__get"
+    },
+    {
+      "method": "GET",
+      "path": "/samples",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "list_samples_samples_get"
+    },
+    {
+      "method": "GET",
+      "path": "/samples/{name}",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "get_sample_samples__name__get"
+    },
+    {
+      "method": "GET",
+      "path": "/seatleak/analyses/{analysis_id}",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "get_seatleak_analysis_seatleak_analyses__analysis_id__get"
+    },
+    {
+      "method": "POST",
+      "path": "/seatleak/analyses/{analysis_id}/adjust",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "adjust_seatleak_seatleak_analyses__analysis_id__adjust_post"
+    },
+    {
+      "method": "GET",
+      "path": "/seatleak/analyses/{analysis_id}/export",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "export_seatleak_json_seatleak_analyses__analysis_id__export_get"
+    },
+    {
+      "method": "GET",
+      "path": "/seatleak/analyses/{analysis_id}/report",
+      "status": 200,
+      "media_type": "text/html",
+      "operation_id": "seatleak_html_report_seatleak_analyses__analysis_id__report_get"
+    },
+    {
+      "method": "POST",
+      "path": "/seatleak/comparisons",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "create_seatleak_comparison_seatleak_comparisons_post"
+    },
+    {
+      "method": "GET",
+      "path": "/seatleak/comparisons/{comparison_id}",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "get_seatleak_comparison_seatleak_comparisons__comparison_id__get"
+    },
+    {
+      "method": "POST",
+      "path": "/seatleak/tests",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "submit_seatleak_test_seatleak_tests_post"
+    },
+    {
+      "method": "GET",
+      "path": "/seatleak/tests/{sl_test_id}",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "get_seatleak_test_seatleak_tests__sl_test_id__get"
+    },
+    {
+      "method": "GET",
+      "path": "/seatleak/tests/{sl_test_id}/analyses",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "list_seatleak_analyses_seatleak_tests__sl_test_id__analyses_get"
+    },
+    {
+      "method": "POST",
+      "path": "/seatleak/tests/{sl_test_id}/analyze",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "analyze_seatleak_seatleak_tests__sl_test_id__analyze_post"
+    },
+    {
+      "method": "GET",
+      "path": "/stemthrust/analyses/{analysis_id}",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "get_thrust_analysis_stemthrust_analyses__analysis_id__get"
+    },
+    {
+      "method": "POST",
+      "path": "/stemthrust/analyses/{analysis_id}/adjust",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "adjust_thrust_stemthrust_analyses__analysis_id__adjust_post"
+    },
+    {
+      "method": "GET",
+      "path": "/stemthrust/analyses/{analysis_id}/export",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "export_thrust_json_stemthrust_analyses__analysis_id__export_get"
+    },
+    {
+      "method": "GET",
+      "path": "/stemthrust/analyses/{analysis_id}/report",
+      "status": 200,
+      "media_type": "text/html",
+      "operation_id": "thrust_html_report_stemthrust_analyses__analysis_id__report_get"
+    },
+    {
+      "method": "POST",
+      "path": "/stemthrust/comparisons",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "create_thrust_comparison_stemthrust_comparisons_post"
+    },
+    {
+      "method": "GET",
+      "path": "/stemthrust/comparisons/{comparison_id}",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "get_thrust_comparison_stemthrust_comparisons__comparison_id__get"
+    },
+    {
+      "method": "POST",
+      "path": "/stemthrust/tests",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "submit_thrust_test_stemthrust_tests_post"
+    },
+    {
+      "method": "GET",
+      "path": "/stemthrust/tests/{ts_test_id}",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "get_thrust_test_stemthrust_tests__ts_test_id__get"
+    },
+    {
+      "method": "GET",
+      "path": "/stemthrust/tests/{ts_test_id}/analyses",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "list_thrust_analyses_stemthrust_tests__ts_test_id__analyses_get"
+    },
+    {
+      "method": "POST",
+      "path": "/stemthrust/tests/{ts_test_id}/analyze",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "analyze_thrust_stemthrust_tests__ts_test_id__analyze_post"
+    },
+    {
+      "method": "POST",
+      "path": "/tests",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "submit_test_tests_post"
+    },
+    {
+      "method": "GET",
+      "path": "/tests/{test_id}",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "get_test_tests__test_id__get"
+    },
+    {
+      "method": "GET",
+      "path": "/tests/{test_id}/analyses",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "list_analyses_tests__test_id__analyses_get"
+    },
+    {
+      "method": "POST",
+      "path": "/tests/{test_id}/analyze",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "analyze_tests__test_id__analyze_post"
+    },
+    {
+      "method": "GET",
+      "path": "/valves",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "list_valves_valves_get"
+    },
+    {
+      "method": "POST",
+      "path": "/valves",
+      "status": 201,
+      "media_type": "application/json",
+      "operation_id": "create_valve_valves_post"
+    },
+    {
+      "method": "GET",
+      "path": "/valves/{valve_id}",
+      "status": 200,
+      "media_type": "application/json",
+      "operation_id": "get_valve_valves__valve_id__get"
+    }
+  ]
+}

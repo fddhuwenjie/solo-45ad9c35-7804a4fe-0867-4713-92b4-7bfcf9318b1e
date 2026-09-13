@@ -4,12 +4,12 @@
 生成新的分析版本；被剔除点保留原始引用（通道、序号、时标、数值）与理由。
 """
 
-import json
 from datetime import datetime, timezone
 
-from .processing import alignment, detection, metrics, segmentation, units
-from . import calibration as calchain
-from . import uncertainty as unc
+from ..common.processing import (
+    alignment, detection, metrics, segmentation, units)
+from ..common import calibration as calchain
+from .. import uncertainty as unc
 
 
 def _parse_time(s):
@@ -341,7 +341,5 @@ def run_analysis(db, test_id, author="auto", new_adjustments=None,
     result["analysis_id"] = analysis_id
     result["version"] = version
     # 把 id/version 回写库存储
-    db._conn.execute("UPDATE analyses SET result_json=? WHERE id=?",
-                     (json.dumps(result), analysis_id))
-    db._conn.commit()
+    db.update_analysis_result(analysis_id, result)
     return db.get_analysis(analysis_id)

@@ -7,45 +7,19 @@
 泄漏率 = 等效标准体积变化率扣除空白回升速率后的净速率（标准状态，Nl/min）。
 温度升高造成的压力回升在 Veq 中被自动补偿，不会误判为内漏；空白基线
 （同温同压下无泄漏阀门的残余回升）进一步扣除仪表滞后/释气等非泄漏贡献。
+
+温度/流量单位换算表与温度归一化实现集中在公共时序处理层
+（app.common.processing.units），本模块保留同名引用以兼容既有调用。
 """
 
-TEMP_OFFSET_K = 273.15
-
-# 流量单位 → 标准升每分钟 (Nl/min)
-FLOW_TO_NL_MIN = {
-    "nl/min": 1.0,
-    "nl/h": 1.0 / 60.0,
-    "nml/min": 0.001,
-    "sccm": 0.001,
-    "slm": 1.0,
-    "sl/min": 1.0,
-    "nm3/h": 1000.0 / 60.0,
-    "nm3/min": 1000.0,
-}
+from ..common.processing.units import (  # noqa: F401
+    FLOW_TO_NL_MIN, TEMP_OFFSET_K)
+from ..common.processing import units as _units
 
 
 def norm_temperature(points, unit, channel="downstream_temp"):
     """温度统一为 °C。返回 (values_c, notes, conflicts)。"""
-    u = (unit or "").strip().lower()
-    notes, conflicts = [], []
-    vals = [float(p[1]) for p in points]
-    if not vals:
-        conflicts.append(f"{channel}: 采样点为空")
-        return [], notes, conflicts
-    if u in ("c", "°c", "celsius", "degc"):
-        out = vals
-    elif u in ("k", "kelvin"):
-        out = [v - TEMP_OFFSET_K for v in vals]
-        notes.append(f"{channel}: K 已换算为 °C")
-    elif u in ("f", "°f", "fahrenheit"):
-        out = [(v - 32.0) / 1.8 for v in vals]
-        notes.append(f"{channel}: °F 已换算为 °C")
-    else:
-        conflicts.append(f"{channel}: 不支持的温度单位 {unit!r}")
-        return vals, notes, conflicts
-    if min(out) < -TEMP_OFFSET_K:
-        conflicts.append(f"{channel}: 温度低于绝对零度（{min(out):.1f} °C），疑似单位声明错误")
-    return out, notes, conflicts
+    return _units.norm_temperature(points, unit, channel)
 
 
 def norm_flow(points, unit, channel="flow"):

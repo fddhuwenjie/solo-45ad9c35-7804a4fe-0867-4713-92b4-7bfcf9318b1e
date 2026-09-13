@@ -2,6 +2,10 @@
 
 单位冲突（无法换算、量纲与量程不符、数值越界）作为阻断问题返回，
 携带冲突的测试不得用于形成维修结论。
+
+本模块同时集中维护跨诊断能力共享的物理量换算表（温度偏置、气体标准
+流量、液体工况流量），供校准链与各诊断能力共同引用，避免能力包之间
+互相越界依赖。
 """
 
 PRESSURE_TO_KPA = {
@@ -13,6 +17,58 @@ PRESSURE_TO_KPA = {
 }
 
 TRAVEL_UNITS = {"mm", "cm", "in", "inch"}
+
+TEMP_OFFSET_K = 273.15
+
+# 气体流量单位 → 标准升每分钟 (Nl/min)
+FLOW_TO_NL_MIN = {
+    "nl/min": 1.0,
+    "nl/h": 1.0 / 60.0,
+    "nml/min": 0.001,
+    "sccm": 0.001,
+    "slm": 1.0,
+    "sl/min": 1.0,
+    "nm3/h": 1000.0 / 60.0,
+    "nm3/min": 1000.0,
+}
+
+# 液体流量单位（工况体积流量）→ m³/h
+FLOW_TO_M3H = {
+    "m3/h": 1.0,
+    "m³/h": 1.0,
+    "m3/min": 60.0,
+    "m³/min": 60.0,
+    "l/min": 0.06,
+    "l/min": 0.06,
+    "l/h": 0.001,
+    "l/h": 0.001,
+    "gpm": 0.227125,   # US gallon/min
+    "gph": 0.227125 / 60.0,
+}
+
+
+def norm_temperature(points, unit, channel="temperature"):
+    """温度统一为 °C。返回 (values_c, notes, conflicts)。"""
+    u = (unit or "").strip().lower()
+    notes, conflicts = [], []
+    vals = [float(p[1]) for p in points]
+    if not vals:
+        conflicts.append(f"{channel}: 采样点为空")
+        return [], notes, conflicts
+    if u in ("c", "°c", "celsius", "degc"):
+        out = vals
+    elif u in ("k", "kelvin"):
+        out = [v - TEMP_OFFSET_K for v in vals]
+        notes.append(f"{channel}: K 已换算为 °C")
+    elif u in ("f", "°f", "fahrenheit"):
+        out = [(v - 32.0) / 1.8 for v in vals]
+        notes.append(f"{channel}: °F 已换算为 °C")
+    else:
+        conflicts.append(f"{channel}: 不支持的温度单位 {unit!r}")
+        return vals, notes, conflicts
+    if min(out) < -TEMP_OFFSET_K:
+        conflicts.append(f"{channel}: 温度低于绝对零度（{min(out):.1f} °C），疑似单位声明错误")
+    return out, notes, conflicts
 
 
 def _norm_signal(points, unit, range_min, range_max, range_unit, channel):

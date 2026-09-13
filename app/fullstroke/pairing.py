@@ -5,8 +5,8 @@
 中心值差值但明确标为 not_evaluated，不得据中心值直接判定。
 """
 
-from . import calibration as calchain
-from . import uncertainty as unc
+from ..common import calibration as calchain
+from .. import uncertainty as unc
 
 # 参与比较的标量指标：(名称, 取值函数, 阈值键, 单位)
 METRIC_KEYS = [

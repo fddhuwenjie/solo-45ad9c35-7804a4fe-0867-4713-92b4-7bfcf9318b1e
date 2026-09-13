@@ -6,7 +6,7 @@
 
 import html
 
-from .calibration_report import render_calibration_section
+from ..common.calibration_report import render_calibration_section
 
 SEG_COLORS = {"opening": "#dbeafe", "closing": "#ffedd5", "dwell": "#f3f4f6"}
 SEG_NAMES = {"opening": "开阀", "closing": "关阀", "dwell": "停留"}

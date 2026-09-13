@@ -15,25 +15,16 @@
 
 流量单位（液用工况体积流量）：
 m³/h、m³/min、L/min、L/h、US gpm、US gph。
+
+流量单位换算表集中在公共时序处理层（app.common.processing.units），
+本模块保留同名引用以兼容既有调用。
 """
 
-# 流量单位 → m³/h
-FLOW_TO_M3H = {
-    "m3/h": 1.0,
-    "m³/h": 1.0,
-    "m3/min": 60.0,
-    "m³/min": 60.0,
-    "l/min": 0.06,
-    "l/min": 0.06,
-    "l/h": 0.001,
-    "l/h": 0.001,
-    "gpm": 0.227125,   # US gallon/min
-    "gph": 0.227125 / 60.0,
-}
+from ..common.processing.units import (  # noqa: F401
+    FLOW_TO_M3H, TEMP_OFFSET_K)
 
 N1_M3H_BAR = 0.865
 RHO_REF_KG_M3 = 999.0      # 15 °C 参考水密度
-TEMP_OFFSET_K = 273.15
 
 
 def norm_flow_liquid(points, unit, channel="flow"):
