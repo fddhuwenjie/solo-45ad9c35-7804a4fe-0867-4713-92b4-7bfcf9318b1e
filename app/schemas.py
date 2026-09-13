@@ -890,3 +890,245 @@ class PSAdjustRequest(BaseModel):
 class PSCompareRequest(BaseModel):
     analysis_ids: list[int] = []
     valve_tag: Optional[str] = None
+
+
+# ===================== 气动执行机构供气瞬态核算 =====================
+
+ASActuatorType = Literal["spring_return", "double_acting"]
+ASFailMode = Literal["fail_open", "fail_close"]
+ASDirection = Literal["open", "close"]
+ASActionKind = Literal["powered_stroke", "fail_safe_stroke"]
+
+
+class ASQuantity(BaseModel):
+    """带单位数值；单位不在支持集合内时按单位冲突列入证据缺口（不作 422）。"""
+    value: float
+    unit: str
+
+
+class ASChamber(BaseModel):
+    """单腔容积：行程两端的最小/最大容积（线性于阀位）。"""
+    min_volume: ASQuantity = Field(..., description="行程端部最小容积（l/m3）")
+    max_volume: ASQuantity = Field(..., description="行程端部最大容积（l/m3）")
+
+
+class ASSpring(BaseModel):
+    """弹簧曲线：力取正值，作用方向由 fail_mode 决定（fail_close 弹簧向关）。"""
+    force_unit: str = Field("n", description="力单位：n / kn")
+    points: list[list[float]] = Field(
+        ..., min_length=2, description="[[阀位 %, 弹簧力], ...]，阀位升序，须覆盖 0–100%")
+
+    @field_validator("points")
+    @classmethod
+    def _check_spring_points(cls, pts):
+        xs = [float(p[0]) for p in pts]
+        if any(xs[i] <= xs[i - 1] for i in range(1, len(xs))):
+            raise ValueError("弹簧曲线阀位必须严格单调递增")
+        if xs[0] > 0.0 or xs[-1] < 100.0:
+            raise ValueError("弹簧曲线须覆盖 0–100% 阀位")
+        if any(float(p[1]) < 0.0 for p in pts):
+            raise ValueError("弹簧力须为正值（方向由 fail_mode 决定）")
+        return pts
+
+
+class ASActuator(BaseModel):
+    actuator_type: ASActuatorType
+    fail_mode: ASFailMode
+    air_chambers: list[Literal["a", "b"]] = Field(
+        ..., min_length=1,
+        description="供气驱动腔：a=开阀驱动腔，b=关阀驱动腔；"
+                    "spring_return 恰一个，double_acting 一般两个")
+    chamber_a: ASChamber = Field(..., description="A 腔（开阀驱动腔）容积")
+    chamber_b: ASChamber = Field(..., description="B 腔（关阀驱动腔）容积")
+    area_a: ASQuantity = Field(..., description="A 腔有效面积（cm2/m2/in2）")
+    area_b: ASQuantity = Field(..., description="B 腔有效面积（cm2/m2/in2）")
+    spring: Optional[ASSpring] = Field(None, description="弹簧曲线；无弹簧执行器可缺省")
+    load: ASQuantity = Field(default_factory=lambda: ASQuantity(value=0.0, unit="n"),
+                             description="恒定负载力（阻碍动作方向，n/kn）")
+    friction: ASQuantity = Field(default_factory=lambda: ASQuantity(value=0.0, unit="n"),
+                                 description="摩擦力（阻碍动作方向，n/kn）")
+    port_conductance: ASQuantity = Field(
+        default_factory=lambda: ASQuantity(value=5.0, unit="nl/min/kpa"),
+        description="腔口导流能力（nl/min/kpa 或 nm3/h/kpa）")
+    initial_position_pct: float = Field(0.0, ge=0.0, le=100.0,
+                                        description="初始阀位（量程 %）")
+    initial_chamber_pressure: ASQuantity = Field(
+        default_factory=lambda: ASQuantity(value=0.0, unit="kPa"),
+        description="两腔初始压力（表压）")
+
+    @field_validator("air_chambers")
+    @classmethod
+    def _check_air_chambers(cls, v):
+        if len(set(v)) != len(v):
+            raise ValueError("air_chambers 不得重复")
+        return v
+
+    @field_validator("initial_position_pct")
+    @classmethod
+    def _check_initial_position(cls, v):
+        if not (0.0 <= v <= 100.0):
+            raise ValueError("初始阀位须在 0–100% 之间")
+        return v
+
+
+class ASPipeSegment(BaseModel):
+    name: str = Field(..., min_length=1, description="管段标识")
+    length_m: float = Field(..., gt=0, description="管段长度 m")
+    inner_diameter_mm: float = Field(..., gt=0, description="管内径 mm")
+    friction_factor: float = Field(0.03, gt=0, description="达西摩擦因子")
+    minor_loss_k: float = Field(0.0, ge=0, description="局部阻力系数 K")
+
+
+class ASRegulator(BaseModel):
+    set_pressure: ASQuantity = Field(..., description="调压阀设定（出口压力上限，表压）")
+    dp_unit: str = Field("kPa", description="流量曲线压差单位（kPa/MPa/bar/psi/kgf/cm2）")
+    flow_unit: str = Field("Nl/min", description="流量曲线流量单位（Nl/min、Nm3/h、sccm、slm 等）")
+    flow_curve: list[list[float]] = Field(
+        ..., min_length=2,
+        description="[[压差, 流量], ...] 调压阀流量特性，压差严格升序；"
+                    "运行压差超出曲线覆盖范围即判流量曲线覆盖不足")
+
+    @field_validator("flow_curve")
+    @classmethod
+    def _check_flow_curve(cls, pts):
+        dps = [float(p[0]) for p in pts]
+        if any(dps[i] <= dps[i - 1] for i in range(1, len(dps))):
+            raise ValueError("调压阀流量曲线压差必须严格单调递增")
+        if any(float(p[1]) < 0.0 for p in pts):
+            raise ValueError("调压阀流量曲线流量不得为负")
+        return pts
+
+
+class ASTank(BaseModel):
+    volume: ASQuantity = Field(..., description="储气罐容积（l/m3）")
+    initial_pressure: ASQuantity = Field(..., description="储气罐初始压力（表压）")
+
+
+class ASSupply(BaseModel):
+    header_pressure: ASQuantity = Field(..., description="气源总管压力（表压，恒定边界）")
+
+
+class ASEvent(BaseModel):
+    """并发用气事件：某设备在 [t_start_s, t_end_s) 内以恒定流量耗气。"""
+    device: str = Field(..., min_length=1, description="用气设备标识")
+    t_start_s: float = Field(..., ge=0, description="开始时刻 s")
+    t_end_s: float = Field(..., gt=0, description="结束时刻 s")
+    flow: ASQuantity = Field(..., description="耗气流量（标准状态）")
+
+
+class ASAction(BaseModel):
+    """待核算动作：供气驱动行程或失气安全行程。"""
+    name: str = Field(..., min_length=1, description="动作标识")
+    kind: ASActionKind = Field(..., description="powered_stroke=供气驱动行程；"
+                                                "fail_safe_stroke=失气安全行程（仅靠储气罐）")
+    direction: ASDirection = Field(..., description="动作方向：open=开，close=关")
+    t_start_s: float = Field(..., ge=0, description="动作开始时刻 s")
+    travel_time_s_max: float = Field(..., gt=0, description="允许行程时间 s")
+    required_supply_pressure_min: ASQuantity = Field(
+        ..., description="动作期间要求的最低供压（表压）")
+    safe_band_pct: float = Field(2.0, gt=0, le=10.0,
+                                 description="目标/安全位判定带（量程 %）")
+
+
+class ASSolverOpts(BaseModel):
+    dt_s: float = Field(0.005, gt=0, le=0.1, description="积分步长 s（收敛性按 dt 与 dt/2 比较）")
+    t_max_s: float = Field(120.0, gt=0, le=3600.0, description="评估总时长 s")
+    record_dt_s: float = Field(0.05, gt=0, le=10.0, description="逐时结果记录间隔 s")
+    convergence_tol_pct: float = Field(2.0, gt=0, le=50.0,
+                                       description="收敛容差 %（dt 与 dt/2 结果相对偏差上限）")
+    max_stroke_rate_pct_s: float = Field(200.0, gt=0, le=1000.0,
+                                         description="阀位最大机械速率 %/s")
+    ambient_temp_c: float = Field(20.0, ge=-50.0, le=80.0, description="环境温度 °C")
+
+
+class ASSchemeCreate(BaseModel):
+    """供气瞬态核算方案：提交即冻结，修订只能派生新版本。"""
+    valve_tag: str
+    valve_description: str = ""
+    name: str = Field(..., min_length=1, description="方案名称")
+    actuator: ASActuator
+    supply: ASSupply
+    pipe_segments: list[ASPipeSegment] = Field(..., min_length=1,
+                                               description="供气管段（总管→支管节点，串联）")
+    regulator: ASRegulator
+    tank: ASTank
+    events: list[ASEvent] = Field(default_factory=list,
+                                  description="并发用气事件（支管节点耗气）")
+    actions: list[ASAction] = Field(..., min_length=1, description="待核算动作")
+    solver: ASSolverOpts = Field(default_factory=ASSolverOpts)
+
+    @field_validator("actions")
+    @classmethod
+    def _check_actions(cls, acts, info):
+        if any(acts[i].t_start_s < acts[i - 1].t_start_s - 1e-9
+               for i in range(1, len(acts))):
+            raise ValueError("动作必须按开始时刻先后排列")
+        names = [a.name for a in acts]
+        if len(set(names)) != len(names):
+            raise ValueError("动作标识不得重复")
+        return acts
+
+    @field_validator("actuator")
+    @classmethod
+    def _check_actuator(cls, act):
+        if act.actuator_type == "spring_return" and len(act.air_chambers) != 1:
+            raise ValueError("spring_return 执行器须且只须一个供气驱动腔")
+        return act
+
+    @field_validator("actions")
+    @classmethod
+    def _check_actions_vs_actuator(cls, acts, info):
+        act = info.data.get("actuator")
+        if act is None:
+            return acts
+        for a in acts:
+            driven = "a" if a.direction == "open" else "b"
+            if driven not in act.air_chambers:
+                raise ValueError(
+                    f"动作 {a.name!r} 的驱动腔 {driven.upper()} 不是供气驱动腔"
+                    "（该方向为弹簧驱动，供气瞬态核算不适用）")
+            if a.kind == "fail_safe_stroke":
+                want = "close" if act.fail_mode == "fail_close" else "open"
+                if a.direction != want:
+                    raise ValueError(
+                        f"动作 {a.name!r}：失气安全行程方向须指向故障安全位"
+                        f"（fail_mode={act.fail_mode} → {want}）")
+        return acts
+
+
+class ASConcurrencyOverride(BaseModel):
+    """人工改动并发关系：更新/新增/移除某用气设备的事件（必须写理由）。"""
+    device: str = Field(..., min_length=1, description="目标用气设备标识")
+    operation: Literal["update", "add", "remove"] = "update"
+    t_start_s: Optional[float] = Field(None, ge=0)
+    t_end_s: Optional[float] = Field(None, gt=0)
+    flow: Optional[ASQuantity] = None
+    reason: str = Field(..., min_length=1, description="改动理由（必填）")
+
+
+class ASMeasuredBoundary(BaseModel):
+    """采用实测边界：以现场实测值覆盖初始压力/初始阀位（必须写理由）。"""
+    field: Literal["header_pressure", "tank_initial_pressure",
+                   "chamber_initial_pressure", "initial_position_pct"] = Field(
+        ..., description="实测边界字段")
+    value: float
+    unit: str = Field(..., description="实测值单位（压力单位族；initial_position_pct 为 %）")
+    reason: str = Field(..., min_length=1, description="采用理由（必填）")
+
+
+class ASReviseRequest(BaseModel):
+    author: str
+    concurrency_overrides: list[ASConcurrencyOverride] = Field(
+        default_factory=list, description="人工改动并发关系（逐条带理由）")
+    measured_boundaries: list[ASMeasuredBoundary] = Field(
+        default_factory=list, description="采用实测边界（逐条带理由）")
+    note: str = ""
+
+
+class ASSolveRequest(BaseModel):
+    author: str = "auto"
+
+
+class ASCompareRequest(BaseModel):
+    revision_id_a: int
+    revision_id_b: int

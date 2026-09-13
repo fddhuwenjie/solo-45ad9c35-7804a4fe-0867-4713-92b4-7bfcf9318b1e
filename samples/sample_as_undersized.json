@@ -1,0 +1,157 @@
+{
+ "valve_tag": "XV-6201",
+ "valve_description": "气动执行机构供气瞬态核算样例",
+ "name": "as_undersized",
+ "actuator": {
+  "actuator_type": "double_acting",
+  "fail_mode": "fail_close",
+  "air_chambers": [
+   "a",
+   "b"
+  ],
+  "chamber_a": {
+   "min_volume": {
+    "value": 0.5,
+    "unit": "l"
+   },
+   "max_volume": {
+    "value": 3.5,
+    "unit": "l"
+   }
+  },
+  "chamber_b": {
+   "min_volume": {
+    "value": 0.5,
+    "unit": "l"
+   },
+   "max_volume": {
+    "value": 3.5,
+    "unit": "l"
+   }
+  },
+  "area_a": {
+   "value": 100.0,
+   "unit": "cm2"
+  },
+  "area_b": {
+   "value": 100.0,
+   "unit": "cm2"
+  },
+  "load": {
+   "value": 2000.0,
+   "unit": "n"
+  },
+  "friction": {
+   "value": 500.0,
+   "unit": "n"
+  },
+  "port_conductance": {
+   "value": 0.5,
+   "unit": "nl/min/kpa"
+  },
+  "initial_position_pct": 0.0,
+  "initial_chamber_pressure": {
+   "value": 0.0,
+   "unit": "kPa"
+  }
+ },
+ "supply": {
+  "header_pressure": {
+   "value": 600.0,
+   "unit": "kPa"
+  }
+ },
+ "pipe_segments": [
+  {
+   "name": "branch",
+   "length_m": 80.0,
+   "inner_diameter_mm": 6.0,
+   "friction_factor": 0.03,
+   "minor_loss_k": 0.0
+  }
+ ],
+ "regulator": {
+  "set_pressure": {
+   "value": 500.0,
+   "unit": "kPa"
+  },
+  "dp_unit": "kPa",
+  "flow_unit": "Nl/min",
+  "flow_curve": [
+   [
+    10.0,
+    40.0
+   ],
+   [
+    25.0,
+    80.0
+   ],
+   [
+    50.0,
+    120.0
+   ]
+  ]
+ },
+ "tank": {
+  "volume": {
+   "value": 5.0,
+   "unit": "l"
+  },
+  "initial_pressure": {
+   "value": 500.0,
+   "unit": "kPa"
+  }
+ },
+ "events": [
+  {
+   "device": "D1",
+   "t_start_s": 2.5,
+   "t_end_s": 20.0,
+   "flow": {
+    "value": 150.0,
+    "unit": "Nl/min"
+   }
+  },
+  {
+   "device": "D2",
+   "t_start_s": 5.0,
+   "t_end_s": 15.0,
+   "flow": {
+    "value": 100.0,
+    "unit": "Nl/min"
+   }
+  }
+ ],
+ "actions": [
+  {
+   "name": "open1",
+   "kind": "powered_stroke",
+   "direction": "open",
+   "t_start_s": 2.0,
+   "travel_time_s_max": 10.0,
+   "required_supply_pressure_min": {
+    "value": 300.0,
+    "unit": "kPa"
+   }
+  },
+  {
+   "name": "fail_close",
+   "kind": "fail_safe_stroke",
+   "direction": "close",
+   "t_start_s": 30.0,
+   "travel_time_s_max": 20.0,
+   "required_supply_pressure_min": {
+    "value": 150.0,
+    "unit": "kPa"
+   }
+  }
+ ],
+ "solver": {
+  "dt_s": 0.005,
+  "t_max_s": 60.0,
+  "record_dt_s": 0.05,
+  "convergence_tol_pct": 2.0,
+  "max_stroke_rate_pct_s": 200.0,
+  "ambient_temp_c": 20.0
+ }
+}

@@ -242,6 +242,30 @@ CREATE TABLE IF NOT EXISTS pst_comparisons (
   created_at TEXT NOT NULL,
   result_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS airsupply_schemes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  valve_id INTEGER NOT NULL REFERENCES valves(id),
+  name TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  payload_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS airsupply_revisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scheme_id INTEGER NOT NULL REFERENCES airsupply_schemes(id),
+  revision INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  author TEXT NOT NULL DEFAULT 'auto',
+  adjustments_json TEXT NOT NULL DEFAULT '[]',
+  scheme_json TEXT NOT NULL,
+  result_json TEXT NOT NULL,
+  UNIQUE(scheme_id, revision)
+);
+CREATE TABLE IF NOT EXISTS airsupply_comparisons (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scheme_id INTEGER,
+  created_at TEXT NOT NULL,
+  result_json TEXT NOT NULL
+);
 """
 
 
@@ -981,6 +1005,91 @@ class Database:
     def get_pst_comparison(self, comparison_id):
         row = self._conn.execute(
             "SELECT * FROM pst_comparisons WHERE id=?",
+            (comparison_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["result"] = json.loads(d.pop("result_json"))
+        return d
+
+    # ---- 气动执行机构供气瞬态核算：方案 / 修订 / 比较 ----
+    def create_airsupply_scheme(self, valve_id, name, payload):
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """INSERT INTO airsupply_schemes(valve_id, name, created_at, payload_json)
+                   VALUES(?,?,?,?)""",
+                (valve_id, name, _now(), json.dumps(payload)))
+            return cur.lastrowid
+
+    def get_airsupply_scheme(self, scheme_id):
+        row = self._conn.execute(
+            "SELECT * FROM airsupply_schemes WHERE id=?", (scheme_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["payload"] = json.loads(d.pop("payload_json"))
+        return d
+
+    def list_airsupply_schemes(self, valve_id=None):
+        q = "SELECT id, valve_id, name, created_at FROM airsupply_schemes"
+        args = ()
+        if valve_id is not None:
+            q += " WHERE valve_id=?"
+            args = (valve_id,)
+        return [dict(r) for r in self._conn.execute(q + " ORDER BY id", args)]
+
+    def create_airsupply_revision(self, scheme_id, author, adjustments, scheme, result):
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(revision),0) AS v FROM airsupply_revisions "
+                "WHERE scheme_id=?", (scheme_id,)).fetchone()
+            revision = row["v"] + 1
+            cur = self._conn.execute(
+                """INSERT INTO airsupply_revisions(scheme_id, revision, created_at,
+                   author, adjustments_json, scheme_json, result_json)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (scheme_id, revision, _now(), author, json.dumps(adjustments),
+                 json.dumps(scheme), json.dumps(result)))
+            return cur.lastrowid, revision
+
+    def get_airsupply_revision(self, revision_id):
+        row = self._conn.execute(
+            "SELECT * FROM airsupply_revisions WHERE id=?", (revision_id,)).fetchone()
+        return self._as_revision_row(row)
+
+    def list_airsupply_revisions(self, scheme_id):
+        rows = self._conn.execute(
+            """SELECT id, scheme_id, revision, created_at, author
+               FROM airsupply_revisions WHERE scheme_id=? ORDER BY revision""",
+            (scheme_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_airsupply_revision_result(self, revision_id, result):
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE airsupply_revisions SET result_json=? WHERE id=?",
+                (json.dumps(result), revision_id))
+
+    @staticmethod
+    def _as_revision_row(row):
+        if not row:
+            return None
+        d = dict(row)
+        d["adjustments"] = json.loads(d.pop("adjustments_json"))
+        d["scheme"] = json.loads(d.pop("scheme_json"))
+        d["result"] = json.loads(d.pop("result_json"))
+        return d
+
+    def create_airsupply_comparison(self, scheme_id, result):
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """INSERT INTO airsupply_comparisons(scheme_id, created_at, result_json)
+                   VALUES(?,?,?)""", (scheme_id, _now(), json.dumps(result)))
+            return cur.lastrowid
+
+    def get_airsupply_comparison(self, comparison_id):
+        row = self._conn.execute(
+            "SELECT * FROM airsupply_comparisons WHERE id=?",
             (comparison_id,)).fetchone()
         if not row:
             return None

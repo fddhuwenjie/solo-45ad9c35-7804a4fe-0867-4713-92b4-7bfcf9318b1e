@@ -8,6 +8,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from . import calibration as calchain, schemas
+from .airsupply import analysis as as_analysis, compare as as_compare
 from .db import Database
 from .failsafe import failsafe_analysis, failsafe_report, trend as fs_trend
 from .flowcurve import compare as fc_compare, fc_analysis, fc_report
@@ -844,6 +845,113 @@ def create_app(db_path=DEFAULT_DB):
             raise HTTPException(404, str(e))
         cid = db.create_pst_comparison(result.get("valve_id"), result)
         return {"comparison_id": cid, **result}
+
+    # ===================== 气动执行机构供气瞬态核算 =====================
+
+    @app.post("/airsupply/schemes", status_code=201)
+    def create_airsupply_scheme(body: schemas.ASSchemeCreate, db=Depends(get_db)):
+        valve = db.get_valve_by_tag(body.valve_tag)
+        if valve is None:
+            vid = db.create_valve(body.valve_tag, body.valve_description)
+            valve = db.get_valve(vid)
+        scheme_id = db.create_airsupply_scheme(valve["id"], body.name,
+                                               body.model_dump())
+        return {"scheme_id": scheme_id, "valve_id": valve["id"]}
+
+    @app.get("/airsupply/schemes")
+    def list_airsupply_schemes(valve_id: int | None = None, db=Depends(get_db)):
+        return db.list_airsupply_schemes(valve_id)
+
+    @app.get("/airsupply/schemes/{scheme_id}")
+    def get_airsupply_scheme(scheme_id: int, db=Depends(get_db)):
+        s = db.get_airsupply_scheme(scheme_id)
+        if not s:
+            raise HTTPException(404, "供气瞬态核算方案不存在")
+        s["revisions"] = db.list_airsupply_revisions(scheme_id)
+        return s
+
+    @app.post("/airsupply/schemes/{scheme_id}/solve", status_code=201)
+    def solve_airsupply(scheme_id: int, body: schemas.ASSolveRequest | None = None,
+                        db=Depends(get_db)):
+        if db.get_airsupply_scheme(scheme_id) is None:
+            raise HTTPException(404, "供气瞬态核算方案不存在")
+        author = body.author if body else "auto"
+        try:
+            return as_analysis.run_solve(db, scheme_id, author=author)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/airsupply/schemes/{scheme_id}/revise", status_code=201)
+    def revise_airsupply(scheme_id: int, body: schemas.ASReviseRequest,
+                         db=Depends(get_db)):
+        if db.get_airsupply_scheme(scheme_id) is None:
+            raise HTTPException(404, "供气瞬态核算方案不存在")
+        if not body.concurrency_overrides and not body.measured_boundaries:
+            raise HTTPException(422, "修订请求为空：需包含 concurrency_overrides 或 "
+                                     "measured_boundaries")
+        for o in body.concurrency_overrides:
+            if not o.reason.strip():
+                raise HTTPException(422, "人工改动并发关系必须填写理由")
+        for mb in body.measured_boundaries:
+            if not mb.reason.strip():
+                raise HTTPException(422, "采用实测边界必须填写理由")
+        new_adj = []
+        for o in body.concurrency_overrides:
+            new_adj.append({"type": "concurrency_override",
+                            "override": o.model_dump(exclude={"reason"}),
+                            "reason": o.reason})
+        for mb in body.measured_boundaries:
+            new_adj.append({"type": "measured_boundary",
+                            "boundary": mb.model_dump(exclude={"reason"}),
+                            "reason": mb.reason})
+        try:
+            return as_analysis.run_solve(db, scheme_id, author=body.author,
+                                         new_adjustments=new_adj)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+
+    @app.get("/airsupply/schemes/{scheme_id}/revisions")
+    def list_airsupply_revisions(scheme_id: int, db=Depends(get_db)):
+        if db.get_airsupply_scheme(scheme_id) is None:
+            raise HTTPException(404, "供气瞬态核算方案不存在")
+        return db.list_airsupply_revisions(scheme_id)
+
+    @app.get("/airsupply/revisions/{revision_id}")
+    def get_airsupply_revision(revision_id: int, db=Depends(get_db)):
+        r = db.get_airsupply_revision(revision_id)
+        if not r:
+            raise HTTPException(404, "供气瞬态核算修订不存在")
+        return r
+
+    @app.get("/airsupply/revisions/{revision_id}/export")
+    def export_airsupply_revision(revision_id: int, db=Depends(get_db)):
+        r = db.get_airsupply_revision(revision_id)
+        if not r:
+            raise HTTPException(404, "供气瞬态核算修订不存在")
+        return JSONResponse(
+            content=r,
+            headers={"Content-Disposition":
+                     f'attachment; filename="airsupply_scheme{r["scheme_id"]}'
+                     f'_rev{r["revision"]}.json"'})
+
+    @app.post("/airsupply/comparisons", status_code=201)
+    def create_airsupply_comparison(body: schemas.ASCompareRequest, db=Depends(get_db)):
+        try:
+            result = as_compare.compare_revisions(db, body.revision_id_a,
+                                                  body.revision_id_b)
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        cid = db.create_airsupply_comparison(result["scheme_id"], result)
+        return {"comparison_id": cid, **result}
+
+    @app.get("/airsupply/comparisons/{comparison_id}")
+    def get_airsupply_comparison(comparison_id: int, db=Depends(get_db)):
+        c = db.get_airsupply_comparison(comparison_id)
+        if not c:
+            raise HTTPException(404, "供气瞬态核算比较记录不存在")
+        return c
 
     # ---- 请求样例 ----
     @app.get("/samples")
