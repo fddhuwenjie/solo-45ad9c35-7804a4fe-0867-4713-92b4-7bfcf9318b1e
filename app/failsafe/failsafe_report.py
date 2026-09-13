@@ -7,7 +7,7 @@
 import html
 import json
 
-from ..calibration_report import render_calibration_section
+from ..common.calibration_report import render_calibration_section
 
 VERDICT_NAMES = {"pass": "通过", "fail": "未达安全要求", "no_conclusion": "证据不足，不得判定"}
 MODE_NAMES = {"fail_open": "失气打开 (fail-open)", "fail_close": "失气关闭 (fail-close)",

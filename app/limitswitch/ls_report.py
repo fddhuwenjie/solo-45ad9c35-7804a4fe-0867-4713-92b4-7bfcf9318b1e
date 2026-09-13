@@ -8,7 +8,7 @@
 import html
 import json
 
-from ..calibration_report import render_calibration_section
+from ..common.calibration_report import render_calibration_section
 from .ls_analysis import CONTACT_NAMES, DIRECTION_NAMES, EVENT_NAMES
 
 VERDICT_NAMES = {"ok": "未发现异常", "exceedances": "存在异常区间",

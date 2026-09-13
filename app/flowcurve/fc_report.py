@@ -10,7 +10,7 @@
 import html
 import json
 
-from ..calibration_report import render_calibration_section
+from ..common.calibration_report import render_calibration_section
 from .liquid import FLOW_TO_M3H, characteristic_curve
 
 VERDICT_NAMES = {

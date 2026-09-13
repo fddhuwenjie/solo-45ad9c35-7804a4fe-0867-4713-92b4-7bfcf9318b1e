@@ -8,7 +8,7 @@
 import html
 import json
 
-from ..calibration_report import render_calibration_section
+from ..common.calibration_report import render_calibration_section
 
 VERDICT_NAMES = {"pass": "合格", "fail": "推力/摩擦超限", "no_conclusion": "证据不足，不得判定"}
 PHASE_CN = {"breakaway": "启程", "unseat": "离座", "running": "匀速",

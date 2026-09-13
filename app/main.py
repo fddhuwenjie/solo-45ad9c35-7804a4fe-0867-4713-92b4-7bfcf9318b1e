@@ -7,10 +7,11 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from . import analysis, calibration as calchain, pairing, report, schemas
+from . import calibration as calchain, schemas
 from .db import Database
 from .failsafe import failsafe_analysis, failsafe_report, trend as fs_trend
 from .flowcurve import compare as fc_compare, fc_analysis, fc_report
+from .fullstroke import analysis, pairing, report
 from .limitswitch import compare as ls_compare, ls_analysis, ls_report
 from .seatleak import compare as sl_compare, seat_analysis, seat_report
 from .thrustsignature import (
